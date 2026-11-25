@@ -11,6 +11,8 @@
 - 2026-11-25 "The dev server shown to the user pointed at the hosted project, again" [process]: the main session hit the same thing before showing the user a demo bill; it found it by grepping the served bundle and restarted with inline values after asking.
 - 2026-11-24 "Parallel waves with planned cross-task breakage worked" [process]: naming which task updates other tasks' fixtures worked; "promote to `build-task` if a handoff is missed".
 - 2026-11-25 "Parallel agents edited the same files; one changed a label another task's tests assert" [process]: `lib/settleView.ts`, `lib/theme.ts` and tests edited at once; `settle.test` broke on the renamed "Settle up" label with no plan saying who updates it; another session changed `supabase/config.toml`.
+- 2026-11-25 "Two sessions shared files; sequencing by message worked" [process] (added in the visual-pass retro): the visual pass wrote each task's files and what it waited for into its task table ("after the bill-footer merges"), and the settle-early session applied six of our review fixes in the files it owned. That is Change 2 done by hand, and it worked.
+- 2026-11-25 "A new dependency needed a dev server restart; the agent rightly left it" [process] (added in the visual-pass retro): one more reason the main session checks the served app before a user check (Change 1): after a package is added, the server must be restarted with the same inline values.
 - Earlier parallel-work entries: 2026-11-21 "Parallel agents worked from a stale snapshot", 2026-11-22 "App and DB tasks built in parallel drifted…", 2026-11-24 "Other sessions' half-finished edits broke whole-repo test and typecheck runs", 2026-11-25 "Two Claude sessions worked side by side…".
 
 ## Change 1: step 2, "Environment first" sub-bullet

@@ -95,7 +95,8 @@ export type FakeSupabase = ReturnType<typeof createFakeSupabase>;
 
 /** The shape supabase-js returns for a failed request (a PostgrestError), as far as the app reads it. */
 export type FakeDbError = { code?: string; message: string; details?: string | null; hint?: string | null };
-export type FakeResult = { data: unknown; error: FakeDbError | null };
+/** `count` is what supabase-js returns for `.select(cols, { count: 'exact' })`; leave it out otherwise. */
+export type FakeResult = { data: unknown; error: FakeDbError | null; count?: number | null };
 
 /** One builder method call, e.g. `{ method: 'eq', args: ['bill_id', 'b1'] }`. */
 export type QueryCall = { method: string; args: unknown[] };
@@ -125,6 +126,19 @@ export type FakeQueryBuilder = { [K in (typeof BUILDER_METHODS)[number]]: (...ar
   PromiseLike<FakeResult>;
 
 /**
+ * Like PostgREST, a `.select(cols, { count: 'exact' })` read gets a `count`. A handler that leaves
+ * `count` out gets `data.length` (an uncut response); one that sets `count` (even to null or
+ * undefined) keeps its value, to fake a cut-off response or a missing count.
+ */
+function withCount(query: RecordedQuery, result: FakeResult): FakeResult {
+  const select = query.calls.find((c) => c.method === 'select');
+  const options = select?.args[1];
+  const wantsCount = typeof options === 'object' && options !== null && (options as { count?: unknown }).count === 'exact';
+  if (!wantsCount || 'count' in result || !Array.isArray(result.data)) return result;
+  return { ...result, count: result.data.length };
+}
+
+/**
  * `rpc(fn, args)` resolves with whatever the handler set by `__setRpc` returns (default
  * `{ data: null, error: null }`). `from(table)` returns a chainable builder; awaiting it resolves
  * with the result set for that table by `__setTable` (default `{ data: [], error: null }`).
@@ -151,6 +165,7 @@ export function createFakeDb() {
       const handler = tables.get(table) ?? (() => ({ data: [], error: null }));
       return Promise.resolve()
         .then(() => handler(query))
+        .then((result) => withCount(query, result))
         .then(onFulfilled, onRejected);
     };
     return builder;

@@ -1,17 +1,19 @@
 // Home's "added you to a bill" card, the row markers and the foreground refresh: criteria 31–39 in
-// docs/specs/2026-11-24-bill-markers-and-notices.md (Task 5). Every flow runs on native and on web
+// docs/specs/2026-11-24-bill-markers-and-notices.md (Task 5). The settle pills (criteria 44, 63 of
+// docs/specs/2026-11-25-settle-early-and-differences.md, Task 9) are at the end. Every flow runs on native and on web
 // (lessons log 2026-11-19 and 2026-11-24: entry paths on both platforms).
 // The viewer is B. Hana (A) hosts and pays unless a fixture says otherwise.
 import { router as globalRouter } from 'expo-router';
 import { act, fireEvent, renderRouter, screen, waitFor } from 'expo-router/testing-library';
 import * as WebBrowser from 'expo-web-browser';
-import { AppState, Platform, type AppStateStatus } from 'react-native';
+import { AppState, Platform, StyleSheet, type AppStateStatus, type StyleProp, type TextStyle, type ViewStyle } from 'react-native';
 
 import type { BillSummary } from '@/lib/bills';
 import { billRowA11yLabel } from '@/lib/homeMarkers';
 import { savePendingInvite } from '@/lib/pendingInvite';
 import { storage as realStorage } from '@/lib/storage';
 import { supabase as realSupabase } from '@/lib/supabase';
+import { colors } from '@/lib/theme';
 import { fakeSession, type FakeResult, type FakeSupabase, type MemoryStorage } from '@/test-utils/fakes';
 
 jest.mock('@/lib/supabase', () => {
@@ -554,4 +556,367 @@ it('sign-out clears what was dismissed: signing back in shows the card again', a
   expect(WebBrowser.openAuthSessionAsync).toHaveBeenCalled();
   await waitFor(() => expect(router.getPathname()).toBe('/'));
   expect(await screen.findByText(ONE_TITLE)).toBeTruthy();
+});
+
+// ---------------------------------------------------------------------------
+// Settle pills: docs/specs/2026-11-25-settle-early-and-differences.md D7, Task 9, criteria 44 and
+// 63 (A1.9, A1.19 / SE-UX-14, SE-VIS-1, Q-GLYPH). The viewer is B.
+// ---------------------------------------------------------------------------
+
+const C = '00000000-0000-4000-8000-00000000000c';
+const S1 = '33333333-3333-4333-8333-000000000001'; // Hana's bill, B owes $14.80 (H1)
+const S2 = '33333333-3333-4333-8333-000000000002'; // Hana's bill, B marked $14.80 (H2)
+const S3 = '33333333-3333-4333-8333-000000000003'; // B hosts and pays; Hana hasn't paid (H5)
+const S4 = '33333333-3333-4333-8333-000000000004'; // B pays, not complete: no payer marker (HM-4)
+const SETTLE_TABLES = ['bills', 'line_items', 'bill_participants', 'claims'] as const;
+type SettleTable = (typeof SETTLE_TABLES)[number];
+type RawRow = Record<string, unknown>;
+type Person = { user: string; name: string; cents: number; marked?: number };
+
+const NAMES: Record<string, string> = { [A]: 'Hana', [B]: 'Bo', [C]: 'Cy' };
+
+/** One complete bill: each person claims one item of `cents`; the total is their sum. */
+function settleBill(id: string, payer: string, people: Person[], host = payer): Record<SettleTable, RawRow[]> {
+  const total = people.reduce((sum, p) => sum + p.cents, 0);
+  const itemId = (i: number) => `${id.slice(0, -2)}${String(10 + i)}`;
+  return {
+    bills: [
+      {
+        id,
+        host_id: host,
+        payer_id: payer,
+        subtotal_cents: null,
+        tax_cents: 0,
+        fees_cents: 0,
+        tip_cents: 0,
+        subtotal_discount_cents: 0,
+        total_discount_cents: 0,
+        total_cents: total,
+        join_code: CODE,
+        created_at: CREATED,
+        edited_at: null,
+        extras_split: 'proportional',
+      },
+    ],
+    line_items: people.map((p, i) => ({
+      bill_id: id,
+      id: itemId(i),
+      name: `Item ${i + 1}`,
+      note: null,
+      group_position: i,
+      unit_index: 0,
+      group_size: 1,
+      total_cents: p.cents,
+      split_set_by: null,
+      split_set_at: null,
+    })),
+    bill_participants: people.map((p) => ({
+      bill_id: id,
+      user_id: p.user,
+      joined_at: CREATED,
+      settled_at: p.marked === undefined ? null : '2026-11-21T12:00:00Z',
+      settled_cents: p.marked ?? null,
+      profile: { display_name: NAMES[p.user] ?? null, venmo_username: null },
+    })),
+    claims: people.map((p, i) => ({ bill_id: id, line_item_id: itemId(i), user_id: p.user, parts: 1 })),
+  };
+}
+
+/** The my_bills row for a complete settle bill: seen, claimed, complete. */
+function settleRow(id: string, over: Partial<Row> = {}): Row {
+  return mine(id, { added: false, seen: true, claimed_any: true, complete: true, ...over });
+}
+
+const owesBill = (id: string, marked?: number) =>
+  settleBill(id, A, [
+    { user: A, name: 'Hana', cents: 3000 },
+    { user: B, name: 'Bo', cents: 1480, marked },
+  ]);
+
+/** The settle tables, the gates that hold the next batched reads, and a switch that fails them. */
+const settleDb: { data: Record<SettleTable, RawRow[]>; gates: Promise<void>[]; fail: boolean } = {
+  data: { bills: [], line_items: [], bill_participants: [], claims: [] },
+  gates: [],
+  fail: false,
+};
+
+function useSettleBills(...bills: Record<SettleTable, RawRow[]>[]) {
+  settleDb.data = {
+    bills: bills.flatMap((b) => b.bills),
+    line_items: bills.flatMap((b) => b.line_items),
+    bill_participants: bills.flatMap((b) => b.bill_participants),
+    claims: bills.flatMap((b) => b.claims),
+  };
+}
+
+/** Answers fetchBill (eq) and fetchSettleData (in) from settleDb, the way PostgREST filters. */
+function seedSettleTables() {
+  for (const table of SETTLE_TABLES) {
+    supabase.__setTable(table, async (q) => {
+      const key = table === 'bills' ? 'id' : 'bill_id';
+      const eq = q.calls.find((c) => c.method === 'eq');
+      const inn = q.calls.find((c) => c.method === 'in');
+      // The data as it was when the request was sent (a held request answers with old data).
+      let rows = settleDb.data[table];
+      if (inn && table === 'bills') {
+        const gate = settleDb.gates.shift();
+        const fail = settleDb.fail;
+        if (gate) await gate;
+        if (fail) return { data: null, error: { code: '08006', message: 'server text' } };
+      }
+      if (eq) rows = rows.filter((r) => r[key] === eq.args[1]);
+      if (inn) rows = rows.filter((r) => (inn.args[1] as unknown[]).includes(r[key]));
+      if (q.calls.some((c) => c.method === 'maybeSingle')) return { data: rows[0] ?? null, error: null };
+      return { data: rows, error: null };
+    });
+  }
+}
+
+/** A gate the next batched read waits on, and its release. */
+function holdNextSettleRead() {
+  let release: () => void = () => {};
+  settleDb.gates.push(new Promise<void>((r) => (release = r)));
+  return async () => {
+    await act(async () => release());
+  };
+}
+
+/** The ids each fetchSettleData call asked for, in order. */
+const settleReads = () =>
+  supabase.__queries
+    .filter((q) => q.table === 'bills' && q.calls.some((c) => c.method === 'in'))
+    .map((q) => q.calls.find((c) => c.method === 'in')?.args[1] as string[]);
+
+/** The pill's tinted box: the nearest host View above the pill's text that has a background. */
+function pillBox(text: string) {
+  let node = screen.getByText(text).parent;
+  while (node) {
+    const style = StyleSheet.flatten(node.props.style as StyleProp<ViewStyle>);
+    if (String(node.type) === 'View' && style?.backgroundColor) return { node, style };
+    node = node.parent;
+  }
+  throw new Error(`no pill box around ${text}`);
+}
+
+const pillTextColor = (text: string) => StyleSheet.flatten(screen.getByText(text).props.style as StyleProp<TextStyle>)?.color;
+
+/** Host elements that aren't plain views or text (an icon's svg, an image). */
+const iconsIn = (node: ReturnType<typeof screen.getByText>) =>
+  node.findAll((n) => typeof n.type === 'string' && !['View', 'Text'].includes(String(n.type)));
+
+const S1_OWES = "Hana's bill · Nov 20 · $44.80. You owe $14.80";
+const S1_PAID = "Hana's bill · Nov 20 · $44.80. Paid $14.80";
+const S1_PLAIN = "Hana's bill · Nov 20 · $44.80";
+
+describe.each(['ios', 'web'] as const)('Home settle pills (%s)', (os) => {
+  beforeEach(() => {
+    jest.replaceProperty(Platform, 'OS', os);
+    settleDb.gates = [];
+    settleDb.fail = false;
+    useSettleBills(
+      owesBill(S1),
+      owesBill(S2, 1480),
+      settleBill(S3, B, [
+        { user: A, name: 'Hana', cents: 3000 },
+        { user: B, name: 'Bo', cents: 1480 },
+      ]),
+    );
+    seedSettleTables();
+    server.rows = [
+      mine(X), // New
+      mine(Y, { seen: true }), // Nothing claimed yet
+      settleRow(S1),
+      settleRow(S2),
+      settleRow(S3, { host_id: B, host_name: 'Bo', payer_id: B }),
+      settleRow(S4, { host_id: B, host_name: 'Bo', payer_id: B, complete: false }),
+    ];
+  });
+
+  async function openWithPills(initialUrl = '/') {
+    const router = renderRouter(ROUTES, { initialUrl });
+    await screen.findByText('Your bills');
+    expect(await screen.findByText('You owe $14.80')).toBeTruthy();
+    return router;
+  }
+
+  it('44: cold start: each row shows its D7 pill in its tone, and its label carries the words', async () => {
+    await openWithPills();
+    // The list's markers that need no settle data are still there, first in priority.
+    expect(screen.getByText('New')).toBeTruthy();
+    expect(screen.getByText('Nothing claimed yet')).toBeTruthy();
+    expect(screen.getByText('Paid $14.80')).toBeTruthy();
+    expect(screen.getByText('1 person left to pay')).toBeTruthy();
+    // Tones (SE-VIS-1): accent = primarySurface / primary, muted = surfaceMuted / textMuted.
+    const { light } = colors;
+    for (const [pill, bg, fg] of [
+      ['New', light.primarySurface, light.primary],
+      ['You owe $14.80', light.primarySurface, light.primary],
+      ['Nothing claimed yet', light.surfaceMuted, light.textMuted],
+      ['Paid $14.80', light.surfaceMuted, light.textMuted],
+      ['1 person left to pay', light.surfaceMuted, light.textMuted],
+    ] as const) {
+      expect([pill, pillBox(pill).style.backgroundColor]).toEqual([pill, bg]);
+      expect([pill, pillTextColor(pill)]).toEqual([pill, fg]);
+    }
+    // One accessible element per row: the link's label includes the marker's words.
+    expect(screen.getAllByRole('link').map((el) => el.props.accessibilityLabel as string)).toEqual([
+      X_NEW_LABEL,
+      "Hana's bill · Nov 20 · $44.80. You haven't claimed anything yet",
+      S1_OWES,
+      S1_PAID,
+      'Your bill · Nov 20 · $44.80. 1 person still has to pay you',
+      'Your bill · Nov 20 · $44.80',
+    ]);
+  });
+
+  it('44 + 63: one batched read, for the candidates only (no New, no unclaimed, no incomplete bill B pays)', async () => {
+    await openWithPills();
+    expect(settleReads()).toEqual([[S1, S2, S3]]);
+  });
+
+  it('Q-GLYPH: a "done" pill (H2) draws no icon; the row around it does have one (the chevron)', async () => {
+    await openWithPills();
+    const row = screen.getByLabelText(S1_PAID);
+    expect(iconsIn(row).length).toBeGreaterThan(0); // positive control: the detector sees the chevron
+    expect(iconsIn(pillBox('Paid $14.80').node)).toEqual([]);
+    expect(screen.queryByText(/✓|⚠/)).toBeNull();
+  });
+
+  it('copy at 2: "2 people left to pay" and "2 people still have to pay you"', async () => {
+    useSettleBills(
+      settleBill(S3, B, [
+        { user: A, name: 'Hana', cents: 3000 },
+        { user: B, name: 'Bo', cents: 1000 },
+        { user: C, name: 'Cy', cents: 480 },
+      ]),
+    );
+    server.rows = [settleRow(S3, { host_id: B, host_name: 'Bo', payer_id: B })];
+    renderRouter(ROUTES, { initialUrl: '/' });
+    expect(await screen.findByText('2 people left to pay')).toBeTruthy();
+    expect(screen.getByLabelText('Your bill · Nov 20 · $44.80. 2 people still have to pay you')).toBeTruthy();
+  });
+
+  it('after the web OAuth redirect lands on / (session picked up from the URL), pills load once and Home stays put', async () => {
+    const replace = jest.spyOn(globalRouter, 'replace');
+    const push = jest.spyOn(globalRouter, 'push');
+    const router = await openWithPills('/?code=fake-pkce-code');
+    expect(screen.getByText('Paid $14.80')).toBeTruthy();
+    expect(router.getPathname()).toBe('/');
+    expect(push).not.toHaveBeenCalled();
+    expect(replace).not.toHaveBeenCalled();
+    expect(settleReads()).toHaveLength(calls('my_bills').length);
+  });
+
+  it('44: a failed settle read on first load shows today\'s markers and no error', async () => {
+    settleDb.fail = true;
+    renderRouter(ROUTES, { initialUrl: '/' });
+    await screen.findByText('Nothing claimed yet');
+    await waitFor(() => expect(settleReads()).toHaveLength(1));
+    await act(async () => {});
+    expect(screen.getByText('New')).toBeTruthy();
+    expect(screen.queryByText('You owe $14.80')).toBeNull();
+    expect(screen.queryByText('Paid $14.80')).toBeNull();
+    expect(screen.getAllByLabelText(S1_PLAIN)).toHaveLength(2); // S1 and S2, with no settle words
+    expect(screen.queryByText(/server text|Couldn't|wrong/)).toBeNull();
+  });
+
+  it('44 / SE-UX-14: back from a bill, rows keep their pills until the new read lands, then update', async () => {
+    const router = await openWithPills();
+    await press(S1_OWES);
+    await waitFor(() => expect(router.getPathname()).toBe(`/bills/${S1}`));
+    // B paid Hana while away; the next settle read is held.
+    useSettleBills(owesBill(S1, 1480), owesBill(S2, 1480));
+    const release = holdNextSettleRead();
+    const reads = settleReads().length;
+    const loads = calls('my_bills').length;
+    await act(async () => globalRouter.back());
+    await waitFor(() => expect(router.getPathname()).toBe('/'));
+    await waitFor(() => expect(settleReads()).toHaveLength(reads + 1));
+    expect(calls('my_bills').length).toBeGreaterThan(loads);
+    // my_bills has landed; the settle read hasn't: the old pills stay (no blink).
+    expect(screen.getByText('You owe $14.80')).toBeTruthy();
+    expect(screen.getByLabelText(S1_OWES)).toBeTruthy();
+    expect(screen.getByText('1 person left to pay')).toBeTruthy();
+    await release();
+    await waitFor(() => expect(screen.getAllByLabelText(S1_PAID)).toHaveLength(2)); // S1 now, and S2
+    expect(screen.queryByText('You owe $14.80')).toBeNull();
+    // S3 isn't in the new data, so it loses its pill rather than keep a guessed one.
+    expect(screen.queryByText('1 person left to pay')).toBeNull();
+  });
+
+  it('35 / SE-UX-14: a foreground refresh keeps pills while reading; New and unclaimed follow my_bills at once', async () => {
+    const app = spyAppState();
+    await openWithPills();
+    const release = holdNextSettleRead();
+    // X was opened elsewhere (no longer New), S2 left the list, and the rest are unchanged.
+    server.rows = [mine(X, { seen: true }), mine(Y, { seen: true }), settleRow(S1), settleRow(S3, { host_id: B, host_name: 'Bo', payer_id: B })];
+    await app.emit('active');
+    await waitFor(() => expect(screen.queryByText('New')).toBeNull());
+    expect(screen.getAllByText('Nothing claimed yet')).toHaveLength(2);
+    expect(screen.getByText('You owe $14.80')).toBeTruthy();
+    expect(screen.getByText('1 person left to pay')).toBeTruthy();
+    expect(screen.queryByText('Paid $14.80')).toBeNull(); // its bill left the list
+    await release();
+    expect(settleReads().at(-1)).toEqual([S1, S3]);
+    expect(screen.getByText('You owe $14.80')).toBeTruthy();
+  });
+
+  it('review R4: a bill that drops out of the settle candidates loses its pill before the new read lands', async () => {
+    const app = spyAppState();
+    await openWithPills();
+    expect(screen.getByText('1 person left to pay')).toBeTruthy(); // positive control: S3 had a pill
+    const release = holdNextSettleRead();
+    const reads = settleReads().length;
+    // Someone unclaimed on S3, so it isn't complete for its payer (B) any more: no payer pill (HM-4).
+    server.rows = [
+      mine(X),
+      mine(Y, { seen: true }),
+      settleRow(S1),
+      settleRow(S2),
+      settleRow(S3, { host_id: B, host_name: 'Bo', payer_id: B, complete: false }),
+      settleRow(S4, { host_id: B, host_name: 'Bo', payer_id: B, complete: false }),
+    ];
+    await app.emit('active');
+    await waitFor(() => expect(settleReads()).toHaveLength(reads + 1));
+    expect(settleReads().at(-1)).toEqual([S1, S2]);
+    // my_bills has landed and the settle read is held: S3's pill is gone at once; the candidates keep theirs.
+    expect(screen.queryByText('1 person left to pay')).toBeNull();
+    expect(screen.getAllByLabelText('Your bill · Nov 20 · $44.80')).toHaveLength(2); // S3 and S4, no settle words
+    expect(screen.getByText('You owe $14.80')).toBeTruthy();
+    expect(screen.getByText('Paid $14.80')).toBeTruthy();
+    await release();
+    expect(screen.queryByText('1 person left to pay')).toBeNull();
+    expect(screen.getByText('You owe $14.80')).toBeTruthy();
+  });
+
+  it('44 / HM-5: a failed settle read on refresh drops every settle pill, with no error banner', async () => {
+    const app = spyAppState();
+    await openWithPills();
+    settleDb.fail = true;
+    const reads = settleReads().length;
+    await app.emit('active');
+    await waitFor(() => expect(settleReads()).toHaveLength(reads + 1));
+    await waitFor(() => expect(screen.queryByText('You owe $14.80')).toBeNull());
+    expect(screen.getByText('Nothing claimed yet')).toBeTruthy(); // positive control: the list is there
+    expect(screen.queryByText('Paid $14.80')).toBeNull();
+    expect(screen.queryByText('1 person left to pay')).toBeNull();
+    expect(screen.getAllByLabelText(S1_PLAIN)).toHaveLength(2); // S1 and S2, with no settle words
+    expect(screen.queryByText(/server text|Couldn't|wrong/)).toBeNull();
+  });
+
+  it('44: a response from an older load is ignored once a newer one has started', async () => {
+    const app = spyAppState();
+    await openWithPills();
+    // Load 2's read is held and answers with old data (B owes); load 3's answers at once (B paid).
+    const releaseOld = holdNextSettleRead();
+    await app.emit('active');
+    await waitFor(() => expect(settleReads()).toHaveLength(2));
+    useSettleBills(owesBill(S1, 1480));
+    await app.emit('active');
+    await waitFor(() => expect(screen.getByLabelText(S1_PAID)).toBeTruthy());
+    await releaseOld();
+    await act(async () => {});
+    expect(screen.getByLabelText(S1_PAID)).toBeTruthy();
+    expect(screen.queryByText('You owe $14.80')).toBeNull();
+  });
 });

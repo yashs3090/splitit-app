@@ -5,10 +5,13 @@
 // - Shows only what the server has confirmed. A write keeps its button loading until the refetch
 //   that includes it has landed; nothing is optimistic.
 // - Every write is guarded by a ref, so a double tap sends one call.
-// - The Pay and Request handlers call openPaymentLink first, with no await before it (browsers only
-//   allow a popup inside the user's gesture), and ignore taps within 1 s of the last one.
-// - Request (the payer's rows, docs/specs/2026-11-25-venmo-request-buttons.md R4) never writes: no
-//   rpc, no table write, no local "requested" state.
+// - Every Venmo link (Pay, Pay more, Request, Pay back) calls openPaymentLink first, with no await
+//   before it (browsers only allow a popup inside the user's gesture), and ignores taps within 1 s of
+//   the last one: one guard for the card's links, one for the list's.
+// - Request (the payer's rows, docs/specs/2026-11-25-venmo-request-buttons.md R4; the back-due card)
+//   and Pay back never write: no rpc, no table write, no local "requested" state.
+// - "I paid the difference" / "I paid it back" (docs/specs/2026-11-25-settle-early-and-differences.md
+//   D6) send the action's values as lib built them; the "Did you pay?" prompt follows contract O.
 // - No app-state or page-visibility listening for the return from Venmo (M3-UX-1); no native
 //   dialogs (inline confirms).
 // - Every amount and every sentence comes from lib/settle.ts + lib/settleView.ts.
@@ -19,27 +22,32 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Centered, Loading } from '@/components/Centered';
 import { PayerPicker, type PickerConfirm } from '@/components/PayerPicker';
-import { SettleCard } from '@/components/SettleCard';
-import { SettlePeopleList } from '@/components/SettlePeopleList';
+import { SettleCard, type OpenAction } from '@/components/SettleCard';
+import { SettlePeopleList, type RowLink } from '@/components/SettlePeopleList';
 import { BackHeader } from '@/components/ui/BackHeader';
 import { Banner, BannerText } from '@/components/ui/Banner';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { useSession } from '@/lib/auth';
-import { BILL_ERROR_COPY, fetchBill, markPaid, setPayer, unmarkPaid, type BillData } from '@/lib/bills';
+import { BILL_ERROR_COPY, fetchBill, markPaid, setPayer, settleDifference, unmarkPaid, type BillData } from '@/lib/bills';
 import { openPaymentLink } from '@/lib/paylinks';
 import {
   actionError,
   addVenmoPrompt,
   canChangePayer,
+  differenceArgs,
   noticeFor,
+  noticeSnapshot,
   openedStillMatches,
+  openFailedText,
+  openedFor,
   payerIdOf,
   payerLine,
   payOpenFailedLine,
   pickerDecision,
   pickerRows,
   requestOpenFailedLine,
+  requestOpenFailedText,
   settleCard,
   settlePeople,
   settleRequestWebLine,
@@ -50,7 +58,6 @@ import {
   type PayOpenFailure,
   type RequestOpenFailure,
   type SettleAction,
-  type SettleRowRequest,
   type SettleViewInput,
 } from '@/lib/settleView';
 import { layout, space, type, useTheme } from '@/lib/theme';
@@ -69,7 +76,10 @@ export default function SettleRoute() {
 }
 
 /** A write in flight: `clearAt` is the refetch that must land before its button is released. */
-type Busy = { kind: 'mark' | 'unmark'; userId: string; from: 'card' | 'list'; clearAt: number | null };
+type Busy = { kind: 'mark' | 'unmark' | 'difference'; userId: string; from: 'card' | 'list'; clearAt: number | null };
+
+/** A link that didn't open, remembered by its URL (which carries the handle and amount; review R2). */
+type LinkFailure = { url: string; handle: string; cents: number };
 
 type Pick = {
   open: boolean;
@@ -95,8 +105,13 @@ function SettleScreen({ id, myId }: { id: string; myId: string }) {
   // Open failures keep what they described, and show only while it still matches (review R2).
   const [payFailure, setPayFailure] = useState<PayOpenFailure | null>(null);
   const [requestFailure, setRequestFailure] = useState<RequestOpenFailure | null>(null);
+  const [payBackFailure, setPayBackFailure] = useState<LinkFailure | null>(null);
+  /** The back-due card's Request didn't open: its URL (the card's handle and amount come from the model). */
+  const [cardRequestFailure, setCardRequestFailure] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState<string | null>(null);
+  /** "Marked paid back" under the list (SE-UX-12), until the next action. */
+  const [listAnnouncement, setListAnnouncement] = useState<string | null>(null);
   const [pick, setPick] = useState<Pick>(PICK_CLOSED);
 
   const mounted = useRef(true);
@@ -112,6 +127,8 @@ function SettleScreen({ id, myId }: { id: string; myId: string }) {
   const openedRef = useRef<OpenedVenmo | null>(null);
   const lastPayAt = useRef(-Infinity);
   const lastRequestAt = useRef(-Infinity);
+  /** A recorded difference: what to announce once the refetch that includes it has landed. */
+  const landing = useRef<{ clearAt: number; text: string; list: boolean } | null>(null);
   openedRef.current = openedVenmo;
 
   useEffect(() => {
@@ -131,6 +148,16 @@ function SettleScreen({ id, myId }: { id: string; myId: string }) {
   // holds the change.
   useEffect(() => {
     const done = (clearAt: number | null) => clearAt !== null && (version >= clearAt || finished >= clearAt);
+    // A recorded difference is announced only once the screen shows it (a failed refetch says nothing).
+    const l = landing.current;
+    if (l !== null && version >= l.clearAt) {
+      landing.current = null;
+      if (l.list) setListAnnouncement(l.text);
+      // iOS VoiceOver ignores live regions; Android and web read "Marked paid" (card) or the list caption.
+      if (Platform.OS === 'ios') AccessibilityInfo.announceForAccessibility(l.text);
+    } else if (l !== null && finished >= l.clearAt) {
+      landing.current = null;
+    }
     setBusy((b) => {
       if (b === null || !done(b.clearAt)) return b;
       writing.current = false;
@@ -146,8 +173,7 @@ function SettleScreen({ id, myId }: { id: string; myId: string }) {
   // Notices (§6), announcements, and dropping a stale "Did you pay?" on every new version of the data.
   useEffect(() => {
     if (!data || !base) return;
-    const me = data.participants.find((p) => p.userId === myId);
-    const next: NoticeSnapshot = { payerId: payerIdOf(data), myMark: Boolean(me?.mark) };
+    const next: NoticeSnapshot = noticeSnapshot(base);
     const prev = shown.current;
     shown.current = next;
 
@@ -174,37 +200,51 @@ function SettleScreen({ id, myId }: { id: string; myId: string }) {
       }
     }
 
-    // "Did you pay Hana?" only while it still matches the payer and the amount (§3.2).
+    // Contract O: "Did you pay Hana?" stays while the payer and the mark still match (not the amount).
     if (opened !== null && !openedStillMatches(base.plan, myId, opened)) setOpenedVenmo(null);
   }, [data, base, myId]);
 
   // ----- Actions -----
 
-  function onPay(action: Extract<SettleAction, { kind: 'pay' }>) {
+  /** The card's links: Pay, Pay more, and the back-due Request. */
+  function onOpen(action: OpenAction) {
     // R7: a second tap within ~1 s (a double tap) doesn't open Venmo twice.
     const now = Date.now();
     if (now - lastPayAt.current < PAY_REPEAT_MS) return;
     lastPayAt.current = now;
     const opening = openPaymentLink(action.url); // the first call once the tap goes through; no await before it (web popup rule)
-    const handle = base?.payerVenmo ?? '';
-    setOpenedVenmo({ payerId: action.payerId, cents: action.cents });
     setCardError(null);
     setPayFailure(null);
+    setCardRequestFailure(null);
     setAnnouncement(null);
+    if (action.kind === 'request') {
+      // A nudge: nothing changes on screen, nothing is written (VR-6).
+      void opening.then((res) => {
+        if (!res.ok && mounted.current) setCardRequestFailure(action.url);
+      });
+      return;
+    }
+    const handle = base?.payerVenmo ?? '';
+    setOpenedVenmo(openedFor(action));
     void opening.then((res) => {
       if (!res.ok && mounted.current) setPayFailure({ payerId: action.payerId, cents: action.cents, handle });
     });
   }
 
-  function onRequest(request: Extract<SettleRowRequest, { kind: 'link' }>) {
+  /** The list's links: Request (whole share or a "more" difference) and Pay back. Never write. */
+  function onOpenLink(link: RowLink, kind: 'request' | 'pay_back') {
     const now = Date.now();
     if (now - lastRequestAt.current < PAY_REPEAT_MS) return;
     lastRequestAt.current = now;
-    const opening = openPaymentLink(request.url); // first call once the tap goes through; no await before it
+    const opening = openPaymentLink(link.url); // first call once the tap goes through; no await before it
     setListError(null);
     setRequestFailure(null);
+    setPayBackFailure(null);
+    setListAnnouncement(null);
     void opening.then((res) => {
-      if (!res.ok && mounted.current) setRequestFailure({ userId: request.userId, cents: request.cents, handle: request.handle });
+      if (res.ok || !mounted.current) return;
+      if (kind === 'request') setRequestFailure({ userId: link.userId, cents: link.cents, handle: link.handle });
+      else setPayBackFailure({ url: link.url, handle: link.handle, cents: link.cents });
     });
   }
 
@@ -240,7 +280,10 @@ function SettleScreen({ id, myId }: { id: string; myId: string }) {
     setListError(null);
     setPayFailure(null);
     setRequestFailure(null);
+    setPayBackFailure(null);
+    setCardRequestFailure(null);
     setAnnouncement(null);
+    setListAnnouncement(null);
     if (own) iUndid.current = true;
     const res = await unmarkPaid(id, userId);
     if (!mounted.current) return;
@@ -258,10 +301,45 @@ function SettleScreen({ id, myId }: { id: string; myId: string }) {
     if (err.refetch) refetch();
   }
 
-  function onAction(action: Exclude<SettleAction, { kind: 'pay' }>) {
+  /**
+   * "I paid the difference" (card) or "I paid it back" (the payer's row): settleDifference with the
+   * action's values as lib built them (the shown or opened model; never recomputed here).
+   */
+  async function onMarkDifference(action: Extract<SettleAction, { kind: 'mark_difference' }>, from: 'card' | 'list') {
+    if (writing.current) return;
+    writing.current = true;
+    setBusy({ kind: 'difference', userId: action.userId, from, clearAt: null });
+    setCardError(null);
+    setListError(null);
+    setPayFailure(null);
+    setRequestFailure(null);
+    setPayBackFailure(null);
+    setCardRequestFailure(null);
+    setAnnouncement(null);
+    setListAnnouncement(null);
+    const res = await settleDifference(id, ...differenceArgs(action));
+    if (!mounted.current) return;
+    if (res.ok) {
+      const clearAt = refetch();
+      landing.current = { clearAt, text: from === 'card' ? SETTLE_COPY.announceDifference : SETTLE_COPY.announcePaidBack, list: from === 'list' };
+      setBusy((b) => (b ? { ...b, clearAt } : b));
+      return;
+    }
+    writing.current = false;
+    setBusy(null);
+    const err = actionError(res.error, { difference: true });
+    if (from === 'card') setCardError(err.text);
+    else setListError(err.text);
+    if (err.refetch) refetch();
+  }
+
+  function onAction(action: Exclude<SettleAction, OpenAction>) {
     switch (action.kind) {
       case 'mark':
         void onMark(action.payerId, action.cents);
+        return;
+      case 'mark_difference':
+        void onMarkDifference(action, 'card');
         return;
       case 'unmark':
         void onUnmark(action.userId, 'card');
@@ -301,7 +379,8 @@ function SettleScreen({ id, myId }: { id: string; myId: string }) {
       payerId: payerIdOf(fresh),
       // EVERY mark on the bill: set_payer clears them all, and refuses a different count.
       markedIds: fresh.participants.filter((p) => p.mark).map((p) => p.userId),
-      complete: freshInput.plan.status === 'ready',
+      // People can pay as soon as the plan is early (A1.17), so the "already paying" confirm applies then too.
+      complete: freshInput.plan.status === 'ready' || freshInput.plan.status === 'early',
       viewerId: myId,
       nameOf: freshInput.nameOf,
     });
@@ -405,6 +484,18 @@ function SettleScreen({ id, myId }: { id: string; myId: string }) {
   const line = payerLine(input);
   const showChange = canChangePayer(myId, data.bill.host_id, data.participants.length, base.plan);
   const cardBusy = busy !== null && busy.from === 'card' ? busy.kind : null;
+  const listBusy = busy !== null && busy.from === 'list' ? { userId: busy.userId, kind: busy.kind === 'unmark' ? ('unmark' as const) : ('difference' as const) } : null;
+  // Open-failed lines show only while the control they describe is still on screen (review R2).
+  const cardRequest = cardModel.primary?.action.kind === 'request' ? cardModel.primary.action : null;
+  const cardRequestFailed =
+    cardRequestFailure !== null && cardRequest?.url === cardRequestFailure && base.payerVenmo !== null && cardModel.amountCents !== null
+      ? requestOpenFailedText(base.payerVenmo, cardModel.amountCents)
+      : null;
+  const payBackFailed =
+    payBackFailure !== null &&
+    (people?.rows ?? []).some((r) => r.payBack?.link.kind === 'link' && r.payBack.link.url === payBackFailure.url)
+      ? openFailedText(payBackFailure.handle, payBackFailure.cents)
+      : null;
 
   return (
     <>
@@ -501,20 +592,22 @@ function SettleScreen({ id, myId }: { id: string; myId: string }) {
           <SettleCard
             model={cardModel}
             busy={cardBusy}
-            error={cardError ?? payOpenFailedLine(input, payFailure)}
+            error={cardError ?? payOpenFailedLine(input, payFailure) ?? cardRequestFailed}
             announcement={announcement}
-            onPay={onPay}
+            onOpen={onOpen}
             onAction={onAction}
           />
 
           {people !== null ? (
             <SettlePeopleList
               model={people}
-              busyUserId={busy !== null && busy.from === 'list' ? busy.userId : null}
-              error={listError ?? requestOpenFailedLine(people, requestFailure)}
+              busy={listBusy}
+              error={listError ?? requestOpenFailedLine(people, requestFailure) ?? payBackFailed}
               footnote={requestWebLine}
+              announcement={listAnnouncement}
               onUndo={(userId) => void onUnmark(userId, 'list')}
-              onRequest={onRequest}
+              onOpenLink={onOpenLink}
+              onRecord={(action) => void onMarkDifference(action, 'list')}
             />
           ) : null}
         </View>

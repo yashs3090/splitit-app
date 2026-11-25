@@ -1,5 +1,5 @@
 // SegmentedControl: two or three mutually exclusive options on a muted track ("Before / After
-// subtotal", "% / $"). The selected segment is tinted and heavier (700 vs 600: a small step, so
+// subtotal", "% / $"). The selected segment is solid teal and heavier (700 vs 600: a small step, so
 // labels don't change width when the selection moves), and is announced as selected.
 // Segments keep role "button" + selected state, the semantics today's hand-built versions use.
 import Check from 'lucide-react-native/icons/check';
@@ -56,7 +56,7 @@ function Segment<T extends string>({
 }) {
   const { colors } = useTheme();
   const { focusProps, ringStyle } = useFocusRing();
-  const fg = selected ? colors.primary : colors.text;
+  const fg = selected ? colors.onPrimary : colors.text;
   return (
     <Pressable
       accessibilityRole="button"
@@ -69,7 +69,8 @@ function Segment<T extends string>({
       style={({ pressed }) => [
         styles.segment,
         stretch && styles.segmentStretch,
-        selected && { backgroundColor: colors.primarySurface },
+        // Solid teal: the selected indicator is ≥3:1 against the muted track (a tint was ~1:1).
+        selected && { backgroundColor: colors.primary },
         pressed && styles.pressed,
         ringStyle,
       ]}

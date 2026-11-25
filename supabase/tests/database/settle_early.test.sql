@@ -234,6 +234,13 @@ begin
 end $$;
 reset role;
 
+-- Backdate Sam's E13 mark before saving the baseline. mark_paid set settled_at = now(), and now()
+-- is fixed for the whole test transaction, so without this a regression that rewrote
+-- settled_at = now() would still compare equal and the E13 "same settled_at" check could not fail.
+update public.bill_participants as bp
+   set settled_at = timestamptz '2026-01-01 12:00:00+00'
+ where bp.bill_id = pg_temp.bid('e13') and bp.user_id = pg_temp.sam();
+
 -- Sam's E13 mark before the switch (criterion 2 compares against it).
 select set_config('test.e13_at', (select bp.settled_at::text from public.bill_participants as bp
   where bp.bill_id = pg_temp.bid('e13') and bp.user_id = pg_temp.sam()), true);

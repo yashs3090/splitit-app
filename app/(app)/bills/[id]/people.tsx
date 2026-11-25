@@ -28,7 +28,7 @@ import { initials, makeNameOf } from '@/lib/billView';
 import { addParticipant, BILL_ERROR_COPY, removeParticipant, type BillData } from '@/lib/bills';
 import { addablePeople, personName, type Person } from '@/lib/people';
 import { addedText, onlyHostText, onThisBillRows, PEOPLE_COPY, removedText } from '@/lib/peopleView';
-import { layout, space, type, useTheme } from '@/lib/theme';
+import { layout, ROW_MIN_HEIGHT, space, type, useTheme } from '@/lib/theme';
 import { useBill } from '@/lib/useBill';
 import { usePeople } from '@/lib/usePeople';
 
@@ -351,7 +351,7 @@ const styles = StyleSheet.create({
   inlineButton: { paddingHorizontal: space.sm },
   grow: { flex: 1, minWidth: 0 },
   spinner: { alignSelf: 'flex-start' },
-  row: { flexDirection: 'row', alignItems: 'center', gap: space.md, paddingVertical: space.sm, minHeight: 56 },
+  row: { flexDirection: 'row', alignItems: 'center', gap: space.md, paddingVertical: space.sm, minHeight: ROW_MIN_HEIGHT },
   divider: { borderTopWidth: StyleSheet.hairlineWidth },
   info: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: space.md },
   centerText: { textAlign: 'center', maxWidth: layout.message },

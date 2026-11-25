@@ -1232,7 +1232,7 @@ function twoBills(): SettleDataset {
  * Batched claims come back in reverse order: fetchBill doesn't order claims, so the parity check
  * compares them as sets.
  */
-function seedDataset(data: SettleDataset) {
+function seedDataset(data: SettleDataset, opts: { maxRows?: number; count?: (table: SettleTable, total: number) => number | null } = {}) {
   for (const table of SETTLE_TABLES) {
     supabase.__setTable(table, (q) => {
       const key = table === 'bills' ? 'id' : 'bill_id';
@@ -1244,7 +1244,14 @@ function seedDataset(data: SettleDataset) {
       if (inn) rows = rows.filter((r) => (inn.args[1] as unknown[]).includes(keyOf(r)));
       if (q.calls.some((c) => c.method === 'maybeSingle')) return { data: rows[0] ?? null, error: null };
       if (inn && table === 'claims') rows = [...rows].reverse();
-      return { data: rows, error: null };
+      // Like PostgREST: `count` only when the select asked for it, and it counts every matching row,
+      // even past a max_rows cut.
+      const select = q.calls.find((c) => c.method === 'select');
+      const wantsCount = (select?.args[1] as { count?: string } | undefined)?.count === 'exact';
+      const total = rows.length;
+      if (opts.maxRows !== undefined) rows = rows.slice(0, opts.maxRows);
+      if (!wantsCount) return { data: rows, error: null };
+      return { data: rows, error: null, count: opts.count ? opts.count(table, total) : total };
     });
   }
 }
@@ -1271,6 +1278,9 @@ describe('fetchSettleData (D7; criterion 24)', () => {
       expect(q.calls).toContainEqual({ method: 'in', args: [table === 'bills' ? 'id' : 'bill_id', [BILL, BILL_B]] });
       expect(q.calls).toContainEqual({ method: 'range', args: [0, 999] });
       expect(q.calls.filter((c) => c.method === 'range')).toHaveLength(1);
+      // An exact count with every read (R7), so a max_rows cut below 1,000 is still caught.
+      const select = q.calls.find((c) => c.method === 'select')!;
+      expect(select.args[1]).toEqual({ count: 'exact' });
       expect(q.calls.some((c) => c.method === 'eq')).toBe(false);
     }
 
@@ -1361,6 +1371,36 @@ describe('fetchSettleData (D7; criterion 24)', () => {
     expect(res.ok && res.bills.get(BILL)?.claims).toHaveLength(999);
   });
 
+  it('accepts a response whose count equals its length (R7)', async () => {
+    seedDataset(twoBills());
+    const res = await fetchSettleData([BILL, BILL_B]);
+    expect(res.ok && res.bills.size).toBe(2);
+  });
+
+  it.each(SETTLE_TABLES)('treats a %s response cut below 1,000 by a lower max_rows (500 of 600) as network (R7)', async (table) => {
+    const data = twoBills();
+    const filler = data[table][0] as RawRow;
+    data[table] = Array.from({ length: 600 }, () => filler);
+    seedDataset(data, { maxRows: 500 });
+    expect(await fetchSettleData([BILL, BILL_B])).toEqual({ ok: false, error: 'network' });
+  });
+
+  it.each(SETTLE_TABLES)('treats a count one above the %s length as network (R7)', async (t) => {
+    seedDataset(twoBills(), { count: (table, total) => (table === t ? total + 1 : total) });
+    expect(await fetchSettleData([BILL, BILL_B])).toEqual({ ok: false, error: 'network' });
+  });
+
+  it.each(SETTLE_TABLES)('treats a missing count on %s as network (R7)', async (t) => {
+    seedDataset(twoBills(), { count: (table, total) => (table === t ? null : total) });
+    expect(await fetchSettleData([BILL, BILL_B])).toEqual({ ok: false, error: 'network' });
+  });
+
+  it('treats an undefined count as network (R7)', async () => {
+    seedDataset(twoBills());
+    supabase.__setTable('line_items', { data: twoBills().line_items, error: null, count: undefined });
+    expect(await fetchSettleData([BILL, BILL_B])).toEqual({ ok: false, error: 'network' });
+  });
+
   it.each(SETTLE_TABLES)('fails the whole call when the %s read fails', async (table) => {
     seedDataset(twoBills());
     supabase.__setTable(table, { data: null, error: pgError('XX000') });
@@ -1426,13 +1466,14 @@ describe('fetchSettleData (D7; criterion 24)', () => {
   ])('fails the whole call (network) on %s: it could belong to any bill', async (_label, table, stray) => {
     seedDataset(twoBills());
     // Returned as-is (no filtering), so the stray row reaches the parser.
-    supabase.__setTable(table, { data: [...twoBills()[table], stray], error: null });
+    const rows = [...twoBills()[table], stray];
+    supabase.__setTable(table, { data: rows, error: null, count: rows.length });
     await expect(fetchSettleData([BILL, BILL_B])).resolves.toEqual({ ok: false, error: 'network' });
   });
 
   it.each(SETTLE_TABLES)('treats a non-array response from %s as network', async (table) => {
     seedDataset(twoBills());
-    supabase.__setTable(table, { data: { nope: true }, error: null });
+    supabase.__setTable(table, { data: { nope: true }, error: null, count: 1 });
     expect(await fetchSettleData([BILL])).toEqual({ ok: false, error: 'network' });
   });
 });

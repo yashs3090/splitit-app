@@ -11,47 +11,54 @@ import { ToneIcon } from '@/components/ui/ToneIcon';
 import { type CardLine, type SettleAction, type SettleButton, type SettleCardModel } from '@/lib/settleView';
 import { space, type, useTheme, type Palette } from '@/lib/theme';
 
-type PayAction = Extract<SettleAction, { kind: 'pay' }>;
+/** The card's link buttons: they open Venmo and never write (the screen tracks "Did you pay?"). */
+export type OpenAction = Extract<SettleAction, { kind: 'pay' | 'pay_difference' | 'request' }>;
 
 type Props = {
   model: SettleCardModel;
   /** Which write is in flight from this card (its button shows loading; the others are disabled). */
-  busy: 'mark' | 'unmark' | null;
+  busy: 'mark' | 'unmark' | 'difference' | null;
   error: string | null;
-  /** A short confirmation after the person's own undo ("Marked not paid"), read by screen readers. */
-  announcement: string | null;
-  /** The Pay buttons call this straight from the press, so the browser sees the user's gesture. */
-  onPay: (action: PayAction) => void;
-  onAction: (action: Exclude<SettleAction, PayAction>) => void;
+  /** A short confirmation after the person's own undo ("Marked not paid"), read by screen readers. */  announcement: string | null;
+  /** Pay, Pay more and Request call this straight from the press, so the browser sees the user's gesture. */
+  onOpen: (action: OpenAction) => void;
+  onAction: (action: Exclude<SettleAction, OpenAction>) => void;
 };
+
+function isOpen(a: SettleAction): a is OpenAction {
+  return a.kind === 'pay' || a.kind === 'pay_difference' || a.kind === 'request';
+}
+
+const BUSY_KIND = { mark: 'mark', unmark: 'unmark', difference: 'mark_difference' } as const;
 
 function lineColor(c: Palette, tone: CardLine['tone']): string {
   return tone === 'success' ? c.success : tone === 'warning' ? c.warning : c.textMuted;
 }
 
-export function SettleCard({ model, busy, error, announcement, onPay, onAction }: Props) {
+export function SettleCard({ model, busy, error, announcement, onOpen, onAction }: Props) {
   const { colors } = useTheme();
 
   const press = (b: SettleButton) => {
     const a = b.action;
-    if (a.kind === 'pay') onPay(a);
+    if (isOpen(a)) onOpen(a);
     else onAction(a);
   };
-  const isLoading = (b: SettleButton) =>
-    (busy === 'mark' && b.action.kind === 'mark') || (busy === 'unmark' && b.action.kind === 'unmark');
+  const isLoading = (b: SettleButton) => busy !== null && b.action.kind === BUSY_KIND[busy];
 
-  const button = (b: SettleButton, variant: 'primary' | 'ghost') => (
+  // The block slot is filled (primary) unless the model says secondary: the back-due Request is a
+  // nudge that never records anything, so that card has no primary (SE-VIS-3; tonal per V6).
+  const button = (b: SettleButton, slot: 'block' | 'ghost') => (
     <Button
       key={`${b.action.kind}:${b.label}`}
       label={b.label}
-      variant={variant}
-      block={variant === 'primary'}
+      variant={slot === 'ghost' ? 'ghost' : b.variant === 'secondary' ? 'secondary' : 'primary'}
+      block={slot === 'block'}
       accessibilityLabel={b.a11yLabel}
       accessibilityHint={b.a11yHint}
       loading={isLoading(b)}
       disabled={busy !== null && !isLoading(b)}
       onPress={() => press(b)}
-      flush={variant === 'ghost'}
+      flush={slot === 'ghost'}
     />
   );
 
@@ -75,7 +82,7 @@ export function SettleCard({ model, busy, error, announcement, onPay, onAction }
 
       {model.primary || model.notes.length > 0 ? (
         <View style={styles.action}>
-          {model.primary ? button(model.primary, 'primary') : null}
+          {model.primary ? button(model.primary, 'block') : null}
           {model.notes.map((note) => (
             <Text key={note} style={[type.caption, { color: colors.textMuted }]}>
               {note}

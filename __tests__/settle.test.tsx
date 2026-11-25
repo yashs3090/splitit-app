@@ -8,7 +8,7 @@ import { router as globalRouter } from 'expo-router';
 import { act, fireEvent, renderRouter, screen, waitFor, within } from 'expo-router/testing-library';
 import Check from 'lucide-react-native/icons/check';
 import TriangleAlert from 'lucide-react-native/icons/triangle-alert';
-import { AccessibilityInfo, Platform } from 'react-native';
+import { AccessibilityInfo, AppState, Platform, StyleSheet, type AppStateStatus } from 'react-native';
 
 import { BILL_ERROR_COPY } from '@/lib/bills';
 import { openPaymentLink } from '@/lib/paylinks';
@@ -16,6 +16,7 @@ import { savePendingInvite } from '@/lib/pendingInvite';
 import { SETTLE_ALL_ZERO_COPY } from '@/lib/settle';
 import { storage as realStorage } from '@/lib/storage';
 import { supabase as realSupabase } from '@/lib/supabase';
+import { colors } from '@/lib/theme';
 import { fakeSession, type FakeChannel, type FakeDbError, type FakeResult, type FakeSupabase, type MemoryStorage } from '@/test-utils/fakes';
 
 jest.mock('@/lib/supabase', () => {
@@ -63,13 +64,15 @@ const db: {
 const next: {
   mark: FakeDbError | null;
   unmark: FakeDbError | null;
+  /** settle_difference's answer (default: success, applied to `db`; 0 clears the mark). */
+  diff: FakeDbError | null;
   setPayer: FakeDbError[];
   hold: Promise<void> | null;
   /** After a successful write, every bills read fails (the screen's own refetch fails). */
   failReadsAfterWrite: boolean;
   /** The next bills read waits for this (one shot). */
   holdNextRead: Promise<void> | null;
-} = { mark: null, unmark: null, setPayer: [], hold: null, failReadsAfterWrite: false, holdNextRead: null };
+} = { mark: null, unmark: null, diff: null, setPayer: [], hold: null, failReadsAfterWrite: false, holdNextRead: null };
 
 function row(id: string, name: string, cents: number, g: number) {
   return { id, name, note: null, group_position: g, unit_index: 0, group_size: 1, total_cents: cents, split_set_by: null, split_set_at: null };
@@ -115,6 +118,7 @@ function reset() {
   db.fail = false;
   next.mark = null;
   next.unmark = null;
+  next.diff = null;
   next.setPayer = [];
   next.hold = null;
   next.failReadsAfterWrite = false;
@@ -163,6 +167,10 @@ function installServer() {
     } else if (fn === 'unmark_paid') {
       if (next.unmark) return { data: null, error: next.unmark };
       me(a.p_user_id as string).mark = null;
+    } else if (fn === 'settle_difference') {
+      if (next.diff) return { data: null, error: next.diff };
+      const to = a.p_new_cents as number;
+      me(a.p_user_id as string).mark = to === 0 ? null : to;
     } else if (fn === 'set_payer') {
       const err = next.setPayer.shift();
       if (err) return { data: null, error: err };
@@ -173,7 +181,7 @@ function installServer() {
     } else if (fn === 'venmo_prompt_pending') {
       return ok(false);
     }
-    if (next.failReadsAfterWrite && ['mark_paid', 'unmark_paid', 'set_payer'].includes(fn)) db.fail = true;
+    if (next.failReadsAfterWrite && ['mark_paid', 'unmark_paid', 'set_payer', 'settle_difference'].includes(fn)) db.fail = true;
     return ok(null);
   });
 }
@@ -186,7 +194,8 @@ function signInAs(id: string) {
 }
 
 const rpcCalls = (fn: string) => supabase.rpc.mock.calls.filter(([name]) => name === fn);
-const writes = () => supabase.rpc.mock.calls.filter(([name]) => ['mark_paid', 'unmark_paid', 'set_payer'].includes(name));
+const writes = () =>
+  supabase.rpc.mock.calls.filter(([name]) => ['mark_paid', 'unmark_paid', 'set_payer', 'settle_difference'].includes(name));
 const billFetches = () => supabase.__queries.filter((q) => q.table === 'bills').length;
 const liveChannel = (): FakeChannel => {
   const ch = supabase.__channels.filter((c) => !c.removed).at(-1);
@@ -403,7 +412,8 @@ describe('owes', () => {
   it.each([
     ['network', { code: '08006', message: 'server text' }, "Couldn't save. Try again.", false],
     ['payer_changed', { code: '22023', message: 'payer_changed' }, BILL_ERROR_COPY.payer_changed, true],
-    ['not_complete', { code: '22023', message: 'not_complete' }, BILL_ERROR_COPY.not_complete, true],
+    // Settle early (SE-UX-13, Task 6): the Settle screen has its own not_complete copy.
+    ['not_complete', { code: '22023', message: 'not_complete' }, 'Something on the bill just changed. Check your share and try again.', true],
     ['not_allowed', { code: '42501', message: 'not_allowed' }, BILL_ERROR_COPY.not_allowed, false],
     ['invalid_bill', { code: '22023', message: 'is_payer' }, "Couldn't save. Refresh and try again.", true],
   ] as const)('45: %s shows its copy and re-enables the button', async (_code, error, copy, refetches) => {
@@ -471,6 +481,8 @@ describe('other roles and states', () => {
   it('R1 (Amendment A1): blocked by an unclaimed discount only names the discount', async () => {
     const comp = { ...row('22222222-0000-4000-8000-000000000004', 'Police comp', -500, 3), kind: 'discount', applies_to: 'subtotal' };
     db.rows = [...db.rows, comp];
+    // Task 6: a proportional bill is now an early plan, so the blocked card needs an even split.
+    db.bill.extras_split = 'equal';
     await openSettle(B);
     expect(screen.getByText('You can settle up once every discount is claimed (1 discount left).')).toBeTruthy();
     expect(screen.queryByText(MONEY)).toBeNull();
@@ -492,6 +504,7 @@ describe('other roles and states', () => {
 
   it('43: blocked (1 item left): no amounts, no buttons but Back, no Everyone list', async () => {
     db.claims = db.claims.filter((c) => c.line_item_id !== SALAD);
+    db.bill.extras_split = 'equal'; // Task 6: proportional incomplete bills are early plans now
     const router = await openSettle(B);
     expect(screen.getByText('You can settle up once every item is claimed (1 item left).')).toBeTruthy();
     expect(screen.queryByText(MONEY)).toBeNull();
@@ -510,6 +523,7 @@ describe('other roles and states', () => {
 
   it('43: blocked with the viewer marked says the mark is saved, with no amount', async () => {
     db.claims = db.claims.filter((c) => c.line_item_id !== SALAD);
+    db.bill.extras_split = 'equal'; // Task 6: proportional incomplete bills are early plans now
     me(B).mark = 1510;
     await openSettle(B);
     expect(screen.getByText('Your "I paid" is saved.')).toBeTruthy();
@@ -681,8 +695,9 @@ describe('changing who paid (host)', () => {
     expect(screen.getByLabelText('Cancel: keep yourself')).toBeTruthy();
   });
 
-  it('0 marks and incomplete: no confirm', async () => {
+  it('0 marks and incomplete, nobody can pay yet (even split, so not early): no confirm', async () => {
     db.claims = db.claims.filter((c) => c.line_item_id !== SALAD);
+    db.bill.extras_split = 'equal'; // Task 8 / A1.17: an early bill confirms (criterion 61 below)
     await openSettle(A);
     fireEvent.press(screen.getByLabelText('Change'));
     fireEvent.press(screen.getByLabelText('Sam'));
@@ -827,34 +842,36 @@ describe('undo and live', () => {
 // Share changed (criterion 50a)
 // ---------------------------------------------------------------------------
 
-describe('share changed since the mark (50a)', () => {
-  it('higher: Sam sees the warning; Hana\'s row shows both amounts', async () => {
+describe('share changed since the mark (50a; Task 6 copy: more_due / back_due, D6)', () => {
+  // Copy only; the difference handlers (Pay more, I paid the difference, Request, I paid it back)
+  // are tested in "more due" and "back due" at the end of this file (Task 8).
+  it('higher: Sam sees what he owes more; Hana\'s row shows both amounts and the difference', async () => {
     // Tax 763 makes Sam's share exactly 1620 (largest remainder gives him the spare cent).
     db.bill = { ...db.bill, total_cents: 3863, tax_cents: 763 };
     me(B).mark = 1510;
     const r = await openSettle(B);
-    expect(screen.getByText('You paid Hana')).toBeTruthy();
-    expect(screen.getAllByText('$15.10').length).toBeGreaterThan(0);
-    expect(screen.getByText('Your share is now $16.20. Sort out the $1.10 with Hana.')).toBeTruthy();
-    // P3: the warning is an icon beside the words, not a glyph in them.
-    expect(screen.UNSAFE_queryAllByType(TriangleAlert).length).toBeGreaterThan(0);
+    expect(screen.getByText('You owe Hana more')).toBeTruthy();
+    expect(screen.getAllByText('$1.10').length).toBeGreaterThan(0);
+    expect(screen.getByText("Your share is now $16.20. You've marked $15.10 paid.")).toBeTruthy();
+    expect(screen.getByText('Pay Hana $1.10 more on Venmo')).toBeTruthy();
     r.unmount();
     await openSettle(A);
     expect(screen.getByText('Marked $15.10 · share now $16.20')).toBeTruthy();
-    expect(screen.getByLabelText('Sam, marked paid $15.10, share is now $16.20')).toBeTruthy();
+    expect(screen.getByLabelText('Sam, marked paid $15.10, share is now $16.20, owes $1.10 more')).toBeTruthy();
   });
 
   it('lower', async () => {
     me(B).mark = 1620;
     await openSettle(B);
-    expect(screen.getByText('Your share is now $15.10. Hana owes you $1.10 back.')).toBeTruthy();
+    expect(screen.getByText('Hana owes you')).toBeTruthy();
+    expect(screen.getByText("Your share is now $15.10. You've marked $16.20 paid.")).toBeTruthy();
   });
 
   it('$0.00', async () => {
     db.claims = [claim(BURGER, A), claim(SALAD, A), claim(FRIES, A)];
     me(B).mark = 1510;
     await openSettle(B);
-    expect(screen.getByText('Your share is now $0.00. Hana owes you $15.10 back.')).toBeTruthy();
+    expect(screen.getByText("Your share is now $0.00. You've marked $15.10 paid.")).toBeTruthy();
   });
 
   it('negative', async () => {
@@ -863,7 +880,8 @@ describe('share changed since the mark (50a)', () => {
     db.bill = { ...db.bill, total_cents: 800, tax_cents: 0, total_discount_cents: 200, extras_split: 'equal' };
     me(B).mark = 1510;
     await openSettle(B);
-    expect(screen.getByText('Your share is now -$1.00. Hana owes you $16.10 back.')).toBeTruthy();
+    expect(screen.getByText("Your share is now -$1.00. You've marked $15.10 paid.")).toBeTruthy();
+    expect(screen.getByText('Hana also owes you $1.00 for your share. Settle that outside the app.')).toBeTruthy();
   });
 });
 
@@ -928,6 +946,7 @@ describe('review fixes', () => {
 
   it('R1: a payer change succeeds, then the refetch fails: the picker is released', async () => {
     db.claims = db.claims.filter((c) => c.line_item_id !== SALAD); // incomplete: no confirm
+    db.bill.extras_split = 'equal'; // blocked, not early (an early bill confirms, A1.17)
     await openSettle(A);
     next.failReadsAfterWrite = true;
     fireEvent.press(screen.getByLabelText('Change'));
@@ -1058,7 +1077,7 @@ describe.each(['ios', 'web'] as const)('Request buttons on %s', (os) => {
     expect(openLink.mock.calls[0]?.[0]).toContain('amount=16.20');
     expect(openLink.mock.calls[0]?.[0]).toContain('txn=charge');
 
-    me(B).mark = 500;
+    me(B).mark = 1620; // at the share (Task 6: a different mark is a difference row with its own Request)
     await liveChange();
     await waitFor(() => expect(screen.queryAllByText('Request')).toHaveLength(0));
     expect(screen.getByText('Paid')).toBeTruthy();
@@ -1139,5 +1158,452 @@ describe.each(['ios', 'web'] as const)('open-failed lines follow the bill on %s 
     await waitFor(() => expect(screen.queryByLabelText('Request $15.10 from Sam on Venmo, @Tejesh-Bhaumik')).toBeNull());
     expect(screen.getAllByText('Request')).toHaveLength(1); // a request for the new amount
     expect(screen.queryByText(/^Couldn't open Venmo/)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Settle early and differences (docs/specs/2026-11-25-settle-early-and-differences.md, Task 8):
+// criteria 38–43, 45 and 61, on native and web. Fixtures: the worked example above.
+// ---------------------------------------------------------------------------
+
+const DESSERT = '22222222-0000-4000-8000-000000000004';
+const tableWrites = () =>
+  supabase.__queries.filter((q) => q.calls.some((c) => ['insert', 'update', 'delete', 'upsert'].includes(c.method)));
+const diffCalls = () => rpcCalls('settle_difference');
+const background = (label: string) =>
+  (StyleSheet.flatten(screen.getByLabelText(label).props.style) as { backgroundColor?: string }).backgroundColor;
+/** Lets a held rpc go (one shot). */
+function holdRpc(): () => Promise<void> {
+  let release: () => void = () => {};
+  next.hold = new Promise<void>((r) => (release = r));
+  return async () => {
+    next.hold = null;
+    await act(async () => release());
+  };
+}
+/** The app returns to the foreground (back from Venmo on a phone). */
+function captureAppState() {
+  const handlers: ((s: AppStateStatus) => void)[] = [];
+  const spy = jest.spyOn(AppState, 'addEventListener').mockImplementation((_type, handler) => {
+    handlers.push(handler as (s: AppStateStatus) => void);
+    return { remove: () => {} };
+  });
+  return {
+    foreground: async () => {
+      const before = billFetches();
+      await act(async () => handlers.forEach((h) => h('active')));
+      await waitFor(() => expect(billFetches()).toBeGreaterThan(before));
+    },
+    restore: () => spy.mockRestore(),
+  };
+}
+
+describe.each(['ios', 'web'] as const)('settle early (criterion 38, 61) on %s', (os) => {
+  beforeEach(() => {
+    jest.replaceProperty(Platform, 'OS', os);
+    // One Dessert nobody has claimed yet: proportional, so Sam (who has claims) can pay now.
+    db.rows = [...db.rows, row(DESSERT, 'Dessert', 400, 3)];
+    db.bill = { ...db.bill, total_cents: 4000 };
+  });
+
+  it('Sam: the may-change line, Pay opens at once, and "I paid" marks the opened amount', async () => {
+    await openSettle(B);
+    expect(screen.getByText('You owe Hana')).toBeTruthy();
+    expect(screen.getByText('Your share may change until everything is claimed (1 item left).')).toBeTruthy();
+    const pay = screen.getByLabelText(/^Pay Hana \$[\d.]+ on Venmo, to @hana-1$/);
+    const amount = /\$([\d.]+)/.exec(String(pay.props.accessibilityLabel))?.[1] ?? '';
+    fireEvent.press(pay);
+    expect(openLink).toHaveBeenCalledTimes(1); // synchronously, inside the tap
+    expect(openLink.mock.calls[0]?.[0]).toContain(`txn=pay&recipients=hana-1&amount=${amount}`);
+    expect(await screen.findByText('Did you pay Hana?')).toBeTruthy();
+    fireEvent.press(screen.getByLabelText('I paid'));
+    expect(rpcCalls('mark_paid')).toEqual([['mark_paid', { p_bill_id: BILL, p_payer_id: A, p_cents: Math.round(Number(amount) * 100) }]]);
+    expect(await screen.findByText('You paid Hana')).toBeTruthy();
+    expect(screen.getByText("If your share changes, you'll settle the difference here once everything is claimed.")).toBeTruthy();
+  });
+
+  it('returning from Venmo: the "Did you pay?" prompt survives the refetch (contract O)', async () => {
+    const app = captureAppState();
+    await openSettle(B);
+    fireEvent.press(screen.getByLabelText(/^Pay Hana \$[\d.]+ on Venmo, to @hana-1$/));
+    await screen.findByText('Did you pay Hana?');
+    await app.foreground();
+    expect(screen.getByText('Did you pay Hana?')).toBeTruthy();
+    app.restore();
+  });
+
+  it('Hana (payer): "Waiting for everyone to claim", no Request buttons; Sam\'s row is listed', async () => {
+    db.people = [person(A, 'Hana', 'hana-1'), person(B, 'Sam', 'sam-1')];
+    await openSettle(A);
+    expect(screen.getByText('Waiting for everyone to claim')).toBeTruthy();
+    expect(screen.getByText('1 item left to claim')).toBeTruthy();
+    expect(screen.getByLabelText(/^Sam, \$[\d.]+, not paid yet$/)).toBeTruthy(); // the list is there
+    expect(screen.queryAllByText(/^Request/)).toHaveLength(0);
+    expect(screen.queryByLabelText(/^Request /)).toBeNull();
+  });
+
+  it('Hana without Venmo sees the "Add your Venmo" card once Sam can pay', async () => {
+    db.people = [person(A, 'Hana', null), person(B, 'Sam')];
+    await openSettle(A);
+    expect(screen.getByText('Add your Venmo so people can pay you')).toBeTruthy();
+  });
+
+  it('61: the host picking another payer with no marks gets "People may already be paying you."', async () => {
+    db.people = [person(A, 'Hana', 'hana-1'), person(B, 'Sam')];
+    await openSettle(A);
+    fireEvent.press(screen.getByLabelText('Change'));
+    fireEvent.press(screen.getByLabelText('Sam'));
+    expect(await screen.findByText('Switch to Sam? People may already be paying you.')).toBeTruthy();
+    expect(rpcCalls('set_payer')).toHaveLength(0);
+  });
+
+  it('61: the host who isn\'t the payer: "People may already be paying Dee."', async () => {
+    db.people = [person(A, 'Hana', 'hana-1'), person(B, 'Sam'), person(D, 'Dee', 'dee-22')];
+    db.bill.payer_id = D;
+    await openSettle(A);
+    fireEvent.press(screen.getByLabelText('Change'));
+    fireEvent.press(screen.getByLabelText('Sam'));
+    expect(await screen.findByText('Switch to Sam? People may already be paying Dee.')).toBeTruthy();
+  });
+});
+
+describe.each(['ios', 'web'] as const)('more due (criteria 39, 41, 42) on %s', (os) => {
+  const PAY_MORE = 'Pay Hana $1.10 more on Venmo, to @hana-1';
+  const MORE_URL = 'https://venmo.com/?txn=pay&recipients=hana-1&amount=1.10&note=SplitIt%3A%20Salad%2C%20Fries';
+  const RECORD = 'I paid the difference';
+
+  beforeEach(() => {
+    jest.replaceProperty(Platform, 'OS', os);
+    // Tax 763 makes Sam's share exactly 1620; he marked 1510.
+    db.bill = { ...db.bill, total_cents: 3863, tax_cents: 763 };
+    me(B).mark = 1510;
+  });
+
+  it('Pay more opens at once with the difference link, then asks "Did you pay Hana $1.10?"', async () => {
+    await openSettle(B);
+    expect(screen.getByText('You owe Hana more')).toBeTruthy();
+    const pay = screen.getByLabelText(PAY_MORE);
+    expect(pay.props.accessibilityHint).toBe('Opens Venmo');
+    expect(screen.getByLabelText(RECORD).props.accessibilityHint).toBe('Marks the $1.10 difference as paid');
+    expect(screen.getByLabelText('Undo your I paid').props.accessibilityHint).toBe('Clears your whole I paid of $15.10');
+    fireEvent.press(pay);
+    expect(openLink).toHaveBeenCalledTimes(1);
+    expect(openLink).toHaveBeenCalledWith(MORE_URL);
+    expectPrivateNote(openLink.mock.calls[0]?.[0]);
+    expect(diffCalls()).toHaveLength(0);
+    expect(await screen.findByText('Did you pay Hana $1.10?')).toBeTruthy();
+    expect(screen.getByText('@hana-1 · $1.10')).toBeTruthy();
+    // 41: a second tap within 1 s (Open Venmo again) is the same tap.
+    fireEvent.press(screen.getByLabelText('Open Venmo again'));
+    expect(openLink).toHaveBeenCalledTimes(1);
+    act(() => jest.advanceTimersByTime(1000));
+    fireEvent.press(screen.getByLabelText('Open Venmo again'));
+    expect(openLink).toHaveBeenCalledTimes(2);
+  });
+
+  it('"I paid the difference": one rpc for two taps, loading until the refetch, then "Marked paid" at $16.20', async () => {
+    const announce = jest.spyOn(AccessibilityInfo, 'announceForAccessibility');
+    await openSettle(B);
+    fireEvent.press(screen.getByLabelText(PAY_MORE));
+    await screen.findByText('Did you pay Hana $1.10?');
+    const release = holdRpc();
+    fireEvent.press(screen.getByLabelText(RECORD));
+    fireEvent.press(screen.getByLabelText(RECORD));
+    expect(diffCalls()).toEqual([
+      ['settle_difference', { p_bill_id: BILL, p_user_id: B, p_payer_id: A, p_expected_cents: 1510, p_new_cents: 1620 }],
+    ]);
+    expect(disabled(RECORD)).toBe(true);
+    expect(disabled('Open Venmo again')).toBe(true);
+    expect(screen.queryByText('Marked paid')).toBeNull();
+    await release();
+    expect(await screen.findByText('You paid Hana')).toBeTruthy();
+    expect(screen.getAllByText('$16.20')).toHaveLength(2); // the card (the net mark) and Sam's row
+    expect(screen.getByText('Marked paid').props.accessibilityLiveRegion).toBe('polite');
+    expect(screen.queryByText('Did you pay Hana $1.10?')).toBeNull();
+    expect(diffCalls()).toHaveLength(1);
+    if (os === 'ios') expect(announce).toHaveBeenCalledWith('Difference marked paid');
+    else expect(announce).not.toHaveBeenCalledWith('Difference marked paid');
+    announce.mockRestore();
+  });
+
+  it('a host edit while in Venmo moves the share: the prompt stays and still records 1510 → 1620', async () => {
+    const app = captureAppState();
+    await openSettle(B);
+    fireEvent.press(screen.getByLabelText(PAY_MORE));
+    await screen.findByText('Did you pay Hana $1.10?');
+    db.bill = { ...db.bill, total_cents: 4100, tax_cents: 1000 }; // Sam's share is now more than $16.20
+    await app.foreground(); // back from Venmo
+    expect(screen.getByText('Did you pay Hana $1.10?')).toBeTruthy();
+    fireEvent.press(screen.getByLabelText(RECORD));
+    expect(diffCalls()[0]?.[1]).toMatchObject({ p_expected_cents: 1510, p_new_cents: 1620 });
+    // The rest shows as a new difference once the refetch lands.
+    expect(await screen.findByText('You owe Hana more')).toBeTruthy();
+    app.restore();
+  });
+
+  it('mark_changed: its copy as an alert, a refetch, and the button is enabled again', async () => {
+    await openSettle(B);
+    next.diff = { code: '22023', message: 'mark_changed' };
+    const before = billFetches();
+    fireEvent.press(screen.getByLabelText(RECORD));
+    const banner = await screen.findByText('Your "I paid" just changed. Check the amount and try again.');
+    expect(inAlert(banner)).toBe(true);
+    await waitFor(() => expect(billFetches()).toBeGreaterThan(before));
+    await waitFor(() => expect(disabled(RECORD)).toBe(false));
+  });
+
+  it('Hana unmarks Sam while "I paid the difference" is in flight: mark_changed, then the plain owes card', async () => {
+    await openSettle(B);
+    const release = holdRpc();
+    fireEvent.press(screen.getByLabelText(RECORD));
+    me(B).mark = null; // Hana's Undo lands first
+    next.diff = { code: '22023', message: 'mark_changed' };
+    await release();
+    expect(await screen.findByText('Your "I paid" just changed. Check the amount and try again.')).toBeTruthy();
+    expect(await screen.findByText('You owe Hana')).toBeTruthy();
+    expect(screen.getByLabelText('Pay Hana $16.20 on Venmo, to @hana-1')).toBeTruthy();
+    expect(screen.queryByLabelText(RECORD)).toBeNull();
+  });
+
+  it('the write works but the refetch fails: the button is enabled again and nothing shows as settled', async () => {
+    await openSettle(B);
+    next.failReadsAfterWrite = true;
+    fireEvent.press(screen.getByLabelText(RECORD));
+    expect(diffCalls()).toHaveLength(1);
+    await waitFor(() => expect(disabled(RECORD)).toBe(false));
+    expect(screen.queryByText('Marked paid')).toBeNull();
+    expect(screen.getByText('You owe Hana more')).toBeTruthy();
+  });
+
+  it('42: the payer changes while "Did you pay?" is open: notice, prompt gone, nothing records to Hana', async () => {
+    db.people = [person(A, 'Hana', 'hana-1'), person(B, 'Sam', null, 1510), person(D, 'Dee', 'dee-22')];
+    await openSettle(B);
+    fireEvent.press(screen.getByLabelText(PAY_MORE));
+    await screen.findByText('Did you pay Hana $1.10?');
+    db.bill.payer_id = D;
+    db.people.forEach((p) => (p.mark = null)); // set_payer clears every mark
+    await liveChange();
+    expect(await screen.findByText('Dee is now collecting for this bill. If you already paid Hana, sort it out with them.')).toBeTruthy();
+    expect(screen.queryByText('Did you pay Hana $1.10?')).toBeNull();
+    expect(screen.queryByLabelText(RECORD)).toBeNull();
+    expect(screen.getByText('You owe Dee')).toBeTruthy();
+    expect(diffCalls()).toHaveLength(0);
+  });
+
+  it('Pay more failing to open shows the fallback and still asks "Did you pay?"', async () => {
+    openLink.mockResolvedValueOnce({ ok: false });
+    await openSettle(B);
+    fireEvent.press(screen.getByLabelText(PAY_MORE));
+    const line = await screen.findByText("Couldn't open Venmo. Send $1.10 to @hana-1 in the Venmo app.");
+    expect(inAlert(line)).toBe(true);
+    expect(screen.getByText('Did you pay Hana $1.10?')).toBeTruthy();
+  });
+
+  it('Hana (payer) sees "Owes $1.10 more" with a Request for the difference and no Undo', async () => {
+    db.people = [person(A, 'Hana', 'hana-1'), person(B, 'Sam', 'sam-1', 1510), person(D, 'Dee', 'dee-22')];
+    db.bill.host_id = D; // Hana pays but doesn't host: no Undo while the difference is open
+    await openSettle(A);
+    expect(screen.getByLabelText('Sam, marked paid $15.10, share is now $16.20, owes $1.10 more')).toBeTruthy();
+    expect(screen.getByText('Owes $1.10 more')).toBeTruthy();
+    const request = screen.getByLabelText('Request $1.10 more from Sam on Venmo, @sam-1');
+    expect(request.props.accessibilityHint).toBe('Opens Venmo');
+    expect(screen.queryByLabelText("Undo Sam's I paid")).toBeNull();
+    fireEvent.press(request);
+    fireEvent.press(request); // 41
+    expect(openLink).toHaveBeenCalledTimes(1);
+    expect(openLink.mock.calls[0]?.[0]).toContain('txn=charge&recipients=sam-1&amount=1.10');
+    await act(async () => {});
+    expect(writes()).toHaveLength(0);
+    // The payer's card: everyone marked, one difference (warning, live).
+    expect(screen.getByText('1 difference to settle').props.accessibilityLiveRegion).toBe('polite');
+  });
+});
+
+describe.each(['ios', 'web'] as const)('back due (criteria 40, 41, 45) on %s', (os) => {
+  const REQUEST = 'Request $1.10 from Hana on Venmo, @hana-1';
+  const PAY_BACK = 'Pay Sam $1.10 back on Venmo, to @sam-1';
+  const RECORD = 'Mark that you paid Sam $1.10 back';
+
+  beforeEach(() => {
+    jest.replaceProperty(Platform, 'OS', os);
+    // Sam marked $16.20; his share is $15.10, so Hana owes him $1.10 back.
+    db.people = [person(A, 'Hana', 'hana-1'), person(B, 'Sam', 'sam-1', 1620)];
+  });
+
+  it('Sam: the Request button (secondary, not primary) opens at once and writes nothing', async () => {
+    await openSettle(B);
+    expect(screen.getByText('Hana owes you')).toBeTruthy();
+    const request = screen.getByLabelText(REQUEST);
+    expect(request.props.accessibilityHint).toBe('Opens Venmo');
+    expect(background(REQUEST)).toBe(colors.light.primarySurface); // the card has no primary (SE-VIS-3)
+    expect(screen.getByLabelText('Undo your I paid')).toBeTruthy();
+    fireEvent.press(request);
+    fireEvent.press(request); // 41
+    expect(openLink).toHaveBeenCalledTimes(1);
+    expect(openLink.mock.calls[0]?.[0]).toContain('txn=charge&recipients=hana-1&amount=1.10');
+    await act(async () => {});
+    act(() => jest.advanceTimersByTime(5000));
+    expect(supabase.rpc.mock.calls.filter(([fn]) => fn !== 'venmo_prompt_pending')).toHaveLength(0);
+    expect(tableWrites()).toHaveLength(0);
+    expect(screen.getByText('Hana owes you')).toBeTruthy(); // nothing changes on screen (VR-6)
+    // Own row (SE-UX-6): "Hana owes you $1.10 back", and its label says everything.
+    expect(screen.getByText('Hana owes you $1.10 back')).toBeTruthy();
+    expect(screen.getByLabelText('You, marked paid $16.20, share is now $15.10, Hana owes you $1.10 back')).toBeTruthy();
+  });
+
+  it('Sam: Request failing to open shows "Couldn\'t open Venmo. Request …" as an alert', async () => {
+    openLink.mockResolvedValueOnce({ ok: false });
+    await openSettle(B);
+    fireEvent.press(screen.getByLabelText(REQUEST));
+    const line = await screen.findByText("Couldn't open Venmo. Request $1.10 from @hana-1 in the Venmo app.");
+    expect(inAlert(line)).toBe(true);
+  });
+
+  describe('Hana, payer but not host', () => {
+    beforeEach(() => {
+      db.people.push(person(D, 'Dee', 'dee-22'));
+      db.bill.host_id = D;
+    });
+
+    it('the row: warning status, Pay back opens at once with no write, no Undo, wide status column', async () => {
+      await openSettle(A);
+      expect(screen.getByLabelText('Sam, marked paid $16.20, share is now $15.10, you owe Sam $1.10 back')).toBeTruthy();
+      const status = screen.getByText('You owe $1.10 back');
+      expect(StyleSheet.flatten(status.props.style).color).toBe(colors.light.warning);
+      expect(screen.UNSAFE_queryAllByType(TriangleAlert).length).toBeGreaterThan(0);
+      // SE-VIS-6: the status column is the fixed wide one while a difference shows.
+      expect(StyleSheet.flatten((status.parent?.parent?.props as { style?: unknown }).style as never)).toMatchObject({ width: 120 });
+      expect(screen.getByText('Marked $16.20 · share now $15.10')).toBeTruthy();
+      expect(screen.queryByLabelText("Undo Sam's I paid")).toBeNull();
+      const payBack = screen.getByLabelText(PAY_BACK);
+      expect(payBack.props.accessibilityHint).toBe('Opens Venmo');
+      expect(screen.getByLabelText(RECORD).props.accessibilityHint).toBe("Changes Sam's I paid to $15.10");
+      fireEvent.press(payBack);
+      fireEvent.press(payBack); // 41
+      expect(openLink).toHaveBeenCalledTimes(1);
+      expect(openLink.mock.calls[0]?.[0]).toContain('txn=pay&recipients=sam-1&amount=1.10');
+      await act(async () => {});
+      expect(writes()).toHaveLength(0);
+      if (os === 'web') expect(screen.getByText('On a computer? Open Venmo on your phone to pay or request.')).toBeTruthy();
+      else expect(screen.queryByText('On a computer? Open Venmo on your phone to pay or request.')).toBeNull();
+    });
+
+    it('"I paid it back": one rpc for two taps; then the row is "Paid" with Undo back and "Marked paid back"', async () => {
+      const announce = jest.spyOn(AccessibilityInfo, 'announceForAccessibility');
+      await openSettle(A);
+      const release = holdRpc();
+      fireEvent.press(screen.getByLabelText(RECORD));
+      fireEvent.press(screen.getByLabelText(RECORD));
+      expect(diffCalls()).toEqual([
+        ['settle_difference', { p_bill_id: BILL, p_user_id: B, p_payer_id: A, p_expected_cents: 1620, p_new_cents: 1510 }],
+      ]);
+      expect(disabled(RECORD)).toBe(true);
+      expect(disabled(PAY_BACK)).toBe(false); // opening a link writes nothing, so it stays available
+      await release();
+      expect(await screen.findByLabelText('Sam, $15.10, paid')).toBeTruthy();
+      expect(screen.getByText('Paid')).toBeTruthy();
+      expect(screen.getByLabelText("Undo Sam's I paid")).toBeTruthy();
+      expect(screen.queryByLabelText(RECORD)).toBeNull();
+      expect(screen.queryByLabelText(PAY_BACK)).toBeNull();
+      expect(screen.getByText('Marked paid back').props.accessibilityLiveRegion).toBe('polite');
+      if (os === 'ios') expect(announce).toHaveBeenCalledWith('Marked paid back');
+      announce.mockRestore();
+    });
+
+    it('a share of $0: "I paid it back" clears the mark (p_new_cents 0); Sam then has no row and no controls', async () => {
+      db.claims = [claim(BURGER, A), claim(SALAD, A), claim(FRIES, A), claim(FRIES, D)];
+      me(B).mark = 1510;
+      await openSettle(A);
+      const record = screen.getByLabelText('Mark that you paid Sam $15.10 back');
+      expect(record.props.accessibilityHint).toBe("Clears Sam's I paid");
+      fireEvent.press(record);
+      expect(diffCalls()[0]?.[1]).toMatchObject({ p_user_id: B, p_expected_cents: 1510, p_new_cents: 0 });
+      await waitFor(() => expect(screen.queryByLabelText(/^Sam,/)).toBeNull());
+      expect(screen.getByLabelText(/^Dee, /)).toBeTruthy(); // the list is still there
+      expect(screen.queryByLabelText(/^Mark that you paid Sam/)).toBeNull();
+      expect(screen.queryByLabelText(/^Pay Sam /)).toBeNull();
+    });
+
+    it('42: after a payer switch the old payer\'s "I paid it back" gets the payer_changed copy and a refetch', async () => {
+      await openSettle(A);
+      next.diff = { code: '22023', message: 'payer_changed' };
+      const before = billFetches();
+      fireEvent.press(screen.getByLabelText(RECORD));
+      const banner = await screen.findByText(BILL_ERROR_COPY.payer_changed);
+      expect(inAlert(banner)).toBe(true);
+      await waitFor(() => expect(billFetches()).toBeGreaterThan(before));
+      await waitFor(() => expect(disabled(RECORD)).toBe(false));
+    });
+
+    it('Pay back failing to open: "Couldn\'t open Venmo. Send $1.10 to @sam-1 …" under the list, as an alert', async () => {
+      openLink.mockResolvedValueOnce({ ok: false });
+      await openSettle(A);
+      fireEvent.press(screen.getByLabelText(PAY_BACK));
+      const line = await screen.findByText("Couldn't open Venmo. Send $1.10 to @sam-1 in the Venmo app.");
+      expect(inAlert(line)).toBe(true);
+    });
+
+    it('two differences: the payer card says "2 differences to settle"', async () => {
+      db.claims = [claim(BURGER, A), claim(SALAD, B), claim(FRIES, A), claim(FRIES, B), claim(FRIES, D)];
+      me(B).mark = 9999;
+      me(D).mark = 9999;
+      await openSettle(A);
+      expect(screen.getByText('2 differences to settle')).toBeTruthy();
+      expect(screen.getAllByText(/^You owe \$[\d.]+ back$/)).toHaveLength(2);
+    });
+  });
+
+  it('Hana as host and payer: the pay-back controls plus Undo on its own line, which still asks first', async () => {
+    await openSettle(A);
+    expect(screen.getByLabelText(PAY_BACK)).toBeTruthy();
+    expect(screen.getByLabelText(RECORD)).toBeTruthy();
+    fireEvent.press(screen.getByLabelText("Undo Sam's I paid"));
+    expect(screen.getByText('Undo Sam\'s "I paid"?')).toBeTruthy();
+    expect(rpcCalls('unmark_paid')).toHaveLength(0);
+  });
+
+  it('Dee (host, not payer) sees the status and Undo, and no difference controls', async () => {
+    db.people.push(person(D, 'Dee', 'dee-22')); // no claims, so Sam's share is unchanged
+    db.bill.host_id = D;
+    await openSettle(D);
+    expect(screen.getByText('Hana owes $1.10 back')).toBeTruthy();
+    expect(screen.getByLabelText("Undo Sam's I paid")).toBeTruthy();
+    expect(screen.queryByLabelText(PAY_BACK)).toBeNull();
+    expect(screen.queryByLabelText(RECORD)).toBeNull();
+  });
+
+  it('45: every button on the back-due screens has a label and the new ones a hint', async () => {
+    const r = await openSettle(B);
+    for (const b of screen.getAllByRole('button')) expect(String(b.props.accessibilityLabel ?? '')).not.toBe('');
+    r.unmount();
+    await openSettle(A);
+    for (const b of screen.getAllByRole('button')) expect(String(b.props.accessibilityLabel ?? '')).not.toBe('');
+    for (const label of [PAY_BACK, RECORD]) expect(screen.getByLabelText(label).props.accessibilityHint).toBeTruthy();
+  });
+});
+
+// Review R9 (spec A1.2, option A): Hana paid Sam's whole mark back (I paid it back to $0), so the
+// refetch shows Sam with no mark and a share of $0. That isn't an undo, so no "was undone" banner.
+describe.each(['ios', 'web'] as const)('option A: paid back to $0 on %s (review R9)', (os) => {
+  beforeEach(() => {
+    jest.replaceProperty(Platform, 'OS', os);
+  });
+
+  it.each([
+    ['from the plain marked card (share and mark both $15.10)', [claim(BURGER, A), claim(SALAD, B), claim(FRIES, A), claim(FRIES, B)], 'You paid Hana'],
+    ['from back due (share already $0, mark $15.10)', [claim(BURGER, A), claim(SALAD, A), claim(FRIES, A)], 'Hana owes you'],
+  ])('%s: the refetch shows "You\'re all set" and no undone banner', async (_name, startClaims, startLabel) => {
+    db.claims = startClaims;
+    me(B).mark = 1510;
+    await openSettle(B);
+    expect(screen.getByText(startLabel)).toBeTruthy(); // Sam is marked
+    // The refetch: Sam's items are all Hana's, and Hana's "I paid it back" cleared his mark.
+    db.claims = [claim(BURGER, A), claim(SALAD, A), claim(FRIES, A)];
+    me(B).mark = null;
+    await liveChange();
+    expect(await screen.findByText("You're all set")).toBeTruthy();
+    expect(screen.getByText("You don't owe anything on this bill.")).toBeTruthy();
+    expect(screen.queryByText('Your "I paid" was undone. Check Activity to see who.')).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });

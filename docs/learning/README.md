@@ -22,14 +22,15 @@ Study material for the important ideas behind SplitIt: why we chose what we chos
 15. [People and membership](concepts/people-and-membership.md): who counts as "split with", adding, removing and leaving (pointer to ADR 0016)
 16. [In-app notices](concepts/in-app-notices.md): the "added you to a bill" card, the New / Nothing claimed yet markers, and why there are no read receipts
 17. [Platform-specific files](concepts/platform-specific-files.md): `.native.ts` vs `.ts`, and keeping native modules (contacts, SMS) out of the web bundle
-18. [LLM structured extraction](concepts/llm-structured-extraction.md) (**shelved fallback**): parsing receipts with Claude, only if our parser stays under 85% accuracy
-19. [Fetching untrusted URLs (SSRF)](concepts/ssrf-and-untrusted-urls.md) (**deferred**): importing receipt links safely, if we ever add a server
+18. [Design system](concepts/design-system.md): tokens in `lib/theme.ts`, primitives in `components/ui/`, "fix the system, not the screen", no glyphs (words + tone), per-icon lucide imports, contrast checked by a test, dark-mode backgrounds, the keyboard-only focus ring, and the "native slop" review checklist
+19. [LLM structured extraction](concepts/llm-structured-extraction.md) (**shelved fallback**): parsing receipts with Claude, only if our parser stays under 85% accuracy
+20. [Fetching untrusted URLs (SSRF)](concepts/ssrf-and-untrusted-urls.md) (**deferred**): importing receipt links safely, if we ever add a server
 
 ## How notes are written
 Every concept note has the same sections:
 - **The idea:** a plain-language explanation
 - **Why it matters here:** the concrete SplitIt problem it solves
-- **How we use it:** pointers to our code (`file:line` once it exists)
+- **How we use it:** pointers to our code once it exists, as the file plus the symbol name (`lib/split.ts`, `computeShares`), not line numbers, which move with every edit
 - **Pitfalls:** the mistakes people actually make
 - **Check yourself:** 2–4 questions to test your understanding
 - **Learn more:** official docs
