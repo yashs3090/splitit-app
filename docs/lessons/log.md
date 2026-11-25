@@ -802,3 +802,81 @@ Format:
 - Why (root cause): The user's taste: native and light, calm, consistent; they keep things where people already find them.
 - Fix / rule: Styling stays in `lib/theme.ts` + `components/ui/`, icons are `lucide-react-native`, and no UI framework is added. Changes that move a control or change what's visible by default go to the user as proposals, as P11 and P12 did; the opt-in rule doesn't override a placement the user has chosen to keep. User checks still open: light/dark look, the iPhone sheet, VoiceOver, the splash on a build. Log only (the `ui-ux-designer` proposal updates the stale icon and glyph lines).
 - Source: user requests and decisions on P1–P12, docs/specs/2026-11-25-visual-pass.md and docs/specs/2026-11-25-scan-screen-redesign.md
+
+## 2026-11-25: Plans, UX, visual and eng design before code: the staff-engineer review found 7 must-fixes  [area: process]
+- What happened: The user asked for "plans, then UX/UI design, then eng design" before any code and reviewed them on a published review page. The order was: PM spec, then the PM's UX brief (`-ux`), then the visual-designer (`-visual`), then a staff-engineer review by a Plan agent (`-eng`). The review found 7 must-fixes (F1–F7). F1: Home's batch read could be silently cut off at PostgREST `max_rows = 1000`. F2: a $0 mark couldn't be undone, and rule L3 then stopped that person from leaving. F3: the "Did you pay?" prompt was dropped whenever the amount changed. F4/F5: the spec contradicted itself. F6/F7: breakage and task dependencies were missing from the plan. The PM folded them into Amendment A1, together with the visual pass's glyph rule and the ownership gate.
+- Why (root cause): Second time a whole-plan engineering read before code paid off (after M3, 2026-11-24). None of the four kinds it caught (server row caps, degenerate $0 values, internal contradictions, missing dependencies) is on the PM's checklist. A read across all the design docs together is where they show up.
+- Fix / rule: For slices with screens on top of new DB functions, run the staff-engineer review last, over the spec plus any UX and visual docs, and before any code. Its checklist adds server-side limits (row caps, size limits), degenerate values ($0, empty, one person), whether the spec agrees with itself, and the planned-breakage and dependency lists. Second occurrence; the pending `2026-11-24-staff-engineer-review.md` is extended and no longer marked optional.
+- Source: docs/specs/2026-11-25-settle-early-and-differences-eng.md (F1–F7); Amendment A1; lesson 2026-11-24 "A staff-engineer review before the screen tasks simplified the plan"
+
+## 2026-11-25: A pending rule would have caused F3: the prompt was keyed on the amount  [area: expo]
+- What happened: `openedStillMatches` in `lib/settleView.ts` kept the "Did you pay?" prompt only while the payer and the **amount** matched. That follows the wording of the pending refetch proposal's Change 2 ("stored with the ids and values it describes (person, amount…)"). When the share changed, which early mode makes common, a person who had already paid in Venmo lost the prompt and was offered a button that records the new amount. The fix (F3) keeps the prompt while the payer and the mark match. Review R5 found the same prompt was lost when the bill turned early (decided as SE-R-5).
+- Why (root cause): "Match every value it mentions" is too strict. A message should be keyed on the facts that decide whether it's still **true**. The amount on a "did you pay?" prompt is a detail; the payer and whether the person is already marked are what make it true.
+- Fix / rule: Key a remembered message or prompt on the facts that decide whether it's still true, not on every value it shows. Test that it goes away when one of those facts changes **and** that it stays when an incidental value (the amount) changes. This is a rule that caused a wrong result, so Change 2 of `2026-11-24-product-engineer-refetch-and-copy.md` is reworded.
+- Source: F3 in docs/specs/2026-11-25-settle-early-and-differences-eng.md; R5 and SE-R-5 in review; lesson 2026-11-25 "A 'Couldn't open Venmo' line outlived the payer and amount it described"
+
+## 2026-11-25: A $0 mark was a trap: no Undo, and it blocked leaving  [area: money-math]
+- What happened: F2: a "paid" mark at $0 (someone whose share is $0, or who was paid back) had no Undo on any screen. Rule L3 counts any mark, so that person could never leave or be removed, and the mark reached states nobody had designed ("You paid Hana / $0.00"). SE-ENG-2 (option A, chosen by the user) hides the "Your 'I paid' was undone" notice when the viewer's new share is $0 or less.
+- Why (root cause): Fourth time a degenerate money value came up after the spec was written (Q10, CD-6, all-zero weights, now a $0 share with a mark). The PM's boundary list doesn't name "a person whose share is $0" or ask what every rule (leave, remove, undo, notices) does for them.
+- Fix / rule: A spec that adds a rule about marks, leaving or notices checks it against a person whose share is $0 and one whose share is negative. Added to Change 2 of the pending `2026-11-24-money-rule-exceptions-and-degenerate-cases.md`.
+- Source: F2 and SE-ENG-2 / A1.2 in docs/specs/2026-11-25-settle-early-and-differences*.md; lesson 2026-11-24 "Degenerate split cases again…"
+
+## 2026-11-25: PostgREST `max_rows` cuts results off without an error, and the first guard assumed its value  [area: rls]
+- What happened: F1: Home's batch read of other bills' state could be silently cut at `max_rows = 1000` (`supabase/config.toml`). The planned guard treated exactly 1000 rows as a failure. Review R7 found that guard assumed `max_rows` is at least 1000; a hosted project can set it lower. The fix uses an exact-count check (`count: 'exact'`) and compares it with the rows received.
+- Why (root cause): A server-side limit that truncates instead of failing looks like success. The guard copied the limit's value instead of asking the server how many rows there were.
+- Fix / rule: Any read that can return many rows either pages or asks for the exact count and fails closed when fewer rows arrive than the count. Don't hard-code `max_rows`. First occurrence; log only, and it's on the staff-engineer checklist.
+- Source: F1 (eng doc) and R7 in review of docs/specs/2026-11-25-settle-early-and-differences.md
+
+## 2026-11-25: pgTAP "settled_at unchanged" checks couldn't fail, because `now()` is fixed in a transaction  [area: testing]
+- What happened: Review R1 (should-fix): pgTAP asserted `settled_at` was unchanged after a call that shouldn't touch it. Inside the test's single transaction, `now()` returns the same value every time, so a call that wrongly rewrote `settled_at` would also have passed. The fix backdates `settled_at` first, and a mutation run (the function changed to rewrite it) showed the test now fails.
+- Why (root cause): Tenth check in the log that couldn't fail. The second `now()`-is-the-transaction-start finding (2026-11-24 "Activity order inside one edit is random…"). The pending absence-assertions proposal covers unit tests, not pgTAP.
+- Fix / rule: In pgTAP, an "unchanged" check on a timestamp first sets the value to a known past time (or uses `clock_timestamp()` in the fixture), so a rewrite would differ. A new "unchanged" or "absent" check is shown to fail once against a deliberately broken version before it's trusted. Added as Change 5 (`supabase-engineer`) to `2026-11-25-absence-assertions-need-presence.md`.
+- Source: R1 in review of docs/specs/2026-11-25-settle-early-and-differences.md; lessons 2026-11-24 "Activity order inside one edit…" and 2026-11-25 "A 'no glyphs' test passed…"
+
+## 2026-11-25: Parts of one screen worked out the same status separately and disagreed  [area: expo]
+- What happened: Five findings of one kind. F5: the payer card said "Nobody owes you anything" while pay-backs were owed. Review R2: the payer card and the footer disagreed. R3: the footer's icon was chosen by matching the copy text. R4: a stale pill stayed on a bill that was no longer a candidate. QA F-1: the non-payer's Everyone aside says "All paid" while differences are still open (a spec gap, being fixed).
+- Why (root cause): The card, the footer, the aside and the Home pill each derived "settled / owes / owed" in their own code, and the spec described them in separate tables. Second occurrence of 2026-11-21 "Money math was duplicated in a component", now for status instead of amounts. Choosing an icon by matching copy breaks when the words change.
+- Fix / rule: One `lib/` function per screen (the view model) gives every part of the screen its status, and the parts render from it. Icons and tones come from the status kind, never from the copy. A test sets up each status and checks that every part showing it agrees. New narrow proposal `2026-11-25-one-status-source-per-screen.md` for `product-engineer` and `code-reviewer`. It is scoped to screens, not the rejected repo-wide `CLAUDE.md` bullet.
+- Source: F5 (eng doc), R2–R4 in review, QA F-1, docs/specs/2026-11-25-settle-early-and-differences.md; lesson 2026-11-21 "Money math was duplicated in a component"
+
+## 2026-11-25: The same rule again, in SQL: `private.settle_state` restates `bill_is_complete`  [area: money-math]
+- What happened: The docs-writer flagged that `private.settle_state` repeats the rule in `private.bill_is_complete` instead of calling it (it was written as one SQL statement for a consistent snapshot, A1.11).
+- Why (root cause): Fourth "same rule in two places" (2026-11-22, 2026-11-24, 2026-11-25 TypeScript, now SQL). It had a reason (one statement under READ COMMITTED), but no test pins the two to the same cases.
+- Fix / rule: Per the 2026-11-25 rejection entry, don't re-propose the convention. Ask the user why `one-rule-one-implementation` was rejected before drafting a narrow version (e.g. "a second copy gets a test that pins both to the same cases"). Meanwhile, a pgTAP test that runs both functions over the E1–E20 bills and expects the same "complete" answer would close this one.
+- Source: docs-writer report, docs/specs/2026-11-25-settle-early-and-differences.md (A1.11); lesson 2026-11-25 "The user rejected the 'import, never copy' CLAUDE.md convention"
+
+## 2026-11-25: Stale-token checks: the order of checks decides the error, and a value isn't a version  [area: rls]
+- What happened: Live run 10a (8/8) found that a stale `p_expected_cents` in the opposite direction gets `not_allowed` rather than `mark_changed`, because a permission check that reads current state runs before the token check. This was relayed to T6 so the screen handles both. Review R8: the token is a value, not a version, so A→B→A passes as current (ABA). This is logged in `docs/before-production.md`.
+- Why (root cause): The spec listed the error codes but not the order of the checks. With state-dependent permission checks, that order decides what a stale client sees. A value token is cheaper than a version column, at the cost of ABA.
+- Fix / rule: When a function takes an expected-state token, the spec gives the order of its checks and the expected error for a stale token in each direction, and the screen maps every one to "this changed, reload". First occurrence; log only. The live multi-user run caught it, so keep doing those runs.
+- Source: live 10a; R8 in review of docs/specs/2026-11-25-settle-early-and-differences.md
+
+## 2026-11-25: Review nits on tests: a hand-built state, and a user-chosen option with no router test  [area: testing]
+- What happened: Review R6: the tests built the "opened" state by hand rather than through the code that produces it. R9: the user's choice for SE-ENG-2 (option A) had no router test.
+- Why (root cause): A hand-built fixture can drift from what the code really produces. A user decision added late (after A1) didn't get a criterion with a test.
+- Fix / rule: Build test states through the same function the app uses. Every user decision recorded in a spec gets a criterion and a test. First occurrence; log only.
+- Source: R6, R9 in review of docs/specs/2026-11-25-settle-early-and-differences.md
+
+## 2026-11-25: The docs handoff lacked the source material, third time  [area: process]
+- What happened: The docs-writer (which chose new ADR 0021) couldn't document review R1 and R6, because the main session gave it R ids with no text. This is the third time a docs handoff lacked its source material (after 2026-11-24 and the bill-markers task).
+- Why (root cause): The pending fix (hand over the spec's docs task whole) covers the spec but not the review findings and QA report, which the docs often need to explain.
+- Fix / rule: The docs handoff includes the paths or full text of the review findings, QA report and decisions it should cover, not only their ids. Third occurrence; extends Change 3 of `2026-11-24-docs-cite-symbols-not-lines.md`.
+- Source: docs-writer report, docs/specs/2026-11-25-settle-early-and-differences.md; lesson 2026-11-24 "The docs handoff dropped items… (second time)"
+
+## 2026-11-25: Another session committed everything onto a new branch mid-task  [area: process]
+- What happened: The two sessions agreed a file-ownership gate and started with the non-overlapping DB and lib tasks. We folded in six of splitit-app-52's review fixes (R1, R2, R3, R7, R8, R10), and its designer folded in our Button-wrap and Avatar-ring fixes. That worked. Mid-task, though, another session's scan agent committed all work (ours included) onto a new branch `feat/qr-invite-settle-visual-pass` at the user's request, so HEAD moved off `main` under this task. QA F-2 also fell between sessions: dev warnings from `Icon.tsx` (owned by the other session) make the LogBox toast cover the footer. We told the other session.
+- Why (root cause): The ownership gate covers files, not git state. A commit or branch switch affects every session's working tree, and nobody announced it beforehand.
+- Fix / rule: A session that commits, switches branch or stashes while another session is active tells the other session first. The main session checks `git branch --show-current` and `git status` at the start of a task and again before its summary, and reports any change. Extends `2026-11-25-build-task-shared-files-and-served-backend.md` (Change 3). Dev warnings that show a LogBox toast count as findings, since the toast covers UI in QA and on device.
+- Source: process and QA F-2, docs/specs/2026-11-25-settle-early-and-differences.md; lessons 2026-11-25 on two sessions
+
+## 2026-11-25: Root `.env` Google variables, seventh report  [area: expo]
+- What happened: QA again reported the `google_oauth_webclient1_*` variables in the root `.env`. They're tracked in `docs/before-production.md` §3.
+- Why (root cause): A user action, still not done. The one-line-report proposal is still pending.
+- Fix / rule: No new rule. Added as evidence to `2026-11-24-bundle-checks-jest-setup-tracked-items.md`.
+- Source: QA report, docs/specs/2026-11-25-settle-early-and-differences.md; six earlier reports
+
+## 2026-11-25: User's choices from settle early and pay the difference  [area: process]
+- What happened: The user asked for a plan, then the UX/UI design, then the eng design, all before any code, and reviewed them on a published page. They answered Q-GLYPH (no check icon on Home pills; the words carry it) and SE-ENG-2 (option A: hide the "undone" notice when the viewer's new share is $0 or less). User checks still open: Venmo on a phone, Google sign-in, VoiceOver, Dynamic Type.
+- Why (root cause): The user's working style for bigger slices: see the whole design before code.
+- Fix / rule: For slices of this size, offer the staged design docs (spec, UX, visual, eng) with a review page before building. Log only; the staff-engineer proposal carries the order.
+- Source: user decisions, docs/specs/2026-11-25-settle-early-and-differences.md (A1.2, Q-GLYPH)

@@ -843,12 +843,17 @@ export function settlePeople(input: SettleViewInput): SettlePeopleModel | null {
   const ordered = [...listed.filter((e) => e.userId === input.viewerId), ...listed.filter((e) => e.userId !== input.viewerId)];
   // The payer's card already says "1 of 2 paid" right above, so their list has no aside (review R4).
   // An early plan has no aside either (people can still be claiming).
+  // "All paid" needs d === 0, the same rule as the payer card and Home's pill. With everyone marked
+  // but a difference open, it uses the payer card's differences wording (QA F-1, SE-QA-1).
   const viewerIsPayer = input.viewerId === plan.payerId;
+  const d = differenceCount(people);
   const aside =
     plan.status !== 'ready' || plan.owingCount === 0 || viewerIsPayer
       ? null
       : plan.allPaid
-        ? SETTLE_COPY.allPaidAside
+        ? d === 0
+          ? SETTLE_COPY.allPaidAside
+          : differencesToSettle(d)
         : paidOfText(plan.paidCount, plan.owingCount);
   const built = ordered.map((e) => rowFor(e, plan, input));
   return { title: SETTLE_COPY.everyoneTitle, aside, rows: built.map((b) => b.row), wideStatus: built.some((b) => b.wide) };

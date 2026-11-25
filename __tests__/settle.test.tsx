@@ -1607,3 +1607,40 @@ describe.each(['ios', 'web'] as const)('option A: paid back to $0 on %s (review 
     expect(screen.queryByRole('alert')).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// QA F-1 (SE-QA-1): the Everyone aside never says "All paid" while a difference is open
+// ---------------------------------------------------------------------------
+
+describe.each(['ios', 'web'] as const)('Everyone aside with open differences (QA F-1) on %s', (os) => {
+  beforeEach(() => {
+    jest.replaceProperty(Platform, 'OS', os);
+  });
+
+  it('Sam marked $15.10 and now owes $16.20: the aside says "1 difference to settle", not "All paid"', async () => {
+    // Tax 763 makes Sam's share exactly 1620; he marked 1510, so every ower is marked but 1 difference is open.
+    db.bill = { ...db.bill, total_cents: 3863, tax_cents: 763 };
+    me(B).mark = 1510;
+    await openSettle(B);
+    expect(screen.getByText('Everyone')).toBeTruthy();
+    expect(screen.getByText('You owe $1.10 more')).toBeTruthy();
+    expect(screen.getByText('1 difference to settle')).toBeTruthy();
+    expect(screen.queryByText('All paid')).toBeNull();
+
+    // The difference settled (mark matches the share): the aside goes back to "All paid", live.
+    me(B).mark = 1620;
+    await liveChange();
+    expect(await screen.findByText('All paid')).toBeTruthy();
+    expect(screen.queryByText('1 difference to settle')).toBeNull();
+  });
+
+  it('two open differences, seen by Dee: "2 differences to settle", not "All paid"', async () => {
+    db.people = [person(A, 'Hana', 'hana-1'), person(B, 'Sam'), person(D, 'Dee')];
+    db.claims = [claim(BURGER, A), claim(SALAD, B), claim(FRIES, A), claim(FRIES, B), claim(FRIES, D)];
+    me(B).mark = 9999;
+    me(D).mark = 9999;
+    await openSettle(D);
+    expect(screen.getByText('2 differences to settle')).toBeTruthy();
+    expect(screen.queryByText('All paid')).toBeNull();
+  });
+});

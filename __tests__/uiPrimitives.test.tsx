@@ -45,14 +45,24 @@ function ancestorStyle(node: Node, key: string): Record<string, unknown> {
   throw new Error(`no ancestor sets ${key}`);
 }
 
+/** The nearest ancestor that carries the icon's screen-reader hiding props (Icon's wrapping View). */
+function hiddenWrapperOf(node: ReturnType<typeof screen.UNSAFE_getByType>): Record<string, unknown> | undefined {
+  let current = node.parent;
+  while (current && current.props.accessibilityElementsHidden === undefined) current = current.parent;
+  return current?.props;
+}
+
 describe('Icon', () => {
   it('uses the theme size and stroke, and is hidden from screen readers', () => {
     render(<Icon icon={Plus} size="sm" color="#123456" />);
     const svg = screen.UNSAFE_getByType(Plus);
-    expect(svg.props).toMatchObject({
-      size: iconSize.sm,
-      strokeWidth: ICON_STROKE,
-      color: '#123456',
+    expect(svg.props).toMatchObject({ size: iconSize.sm, strokeWidth: ICON_STROKE, color: '#123456' });
+    // The hiding props sit on the wrapping View, never on the SVG: on web the SVG would forward
+    // them to <svg> as unknown DOM props (React warning + the dev error toast over the screen).
+    expect(svg.props).not.toHaveProperty('accessible');
+    expect(svg.props).not.toHaveProperty('importantForAccessibility');
+    expect(svg.props).not.toHaveProperty('accessibilityElementsHidden');
+    expect(hiddenWrapperOf(svg)).toMatchObject({
       accessible: false,
       importantForAccessibility: 'no-hide-descendants',
       accessibilityElementsHidden: true,
@@ -367,7 +377,8 @@ describe('Button (V6, first part)', () => {
     mockScheme.mockReturnValue(scheme);
     render(<Button label="Add item" icon={Plus} variant="ghost" onPress={() => {}} />);
     expect(screen.getByRole('button', { name: 'Add item' })).toBeTruthy();
-    expect(screen.UNSAFE_getByType(Plus).props).toMatchObject({ color: colors[scheme].primary, accessible: false });
+    expect(screen.UNSAFE_getByType(Plus).props).toMatchObject({ color: colors[scheme].primary });
+    expect(hiddenWrapperOf(screen.UNSAFE_getByType(Plus))).toMatchObject({ accessible: false, accessibilityElementsHidden: true });
     expect(screen.queryByText('+')).toBeNull();
   });
 
@@ -479,7 +490,8 @@ describe('ToneIcon and PayerPicker (V11, P3)', () => {
     ['error', CircleAlert],
   ] as const)('%s draws its icon, 16 pt, hidden from screen readers', (tone, glyph) => {
     render(<ToneIcon tone={tone} color="#123456" />);
-    expect(screen.UNSAFE_getByType(glyph).props).toMatchObject({ size: iconSize.sm, color: '#123456', accessible: false });
+    expect(screen.UNSAFE_getByType(glyph).props).toMatchObject({ size: iconSize.sm, color: '#123456' });
+    expect(hiddenWrapperOf(screen.UNSAFE_getByType(glyph))).toMatchObject({ accessible: false, accessibilityElementsHidden: true });
   });
 
   it('muted draws nothing', () => {

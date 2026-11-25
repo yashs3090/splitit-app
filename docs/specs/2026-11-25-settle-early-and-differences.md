@@ -655,3 +655,7 @@ Task 10b (after 2, 5, 6, 7):
   Either way the lib returns `icon`, so the answer changes one line in `MarkerPill`. Task 9 builds (b) until you answer.
 - **Gate V timing:** Tasks 6, 8 and 9 wait for the visual pass to report V6–V13 done (A1.23). If that slips, the DB, lib and Home-marker work (1–5, 7, 10a) can still finish. Only the screens wait.
 - Nothing blocks the build.
+
+## Note (2026-11-25, Task 11 docs)
+- **ADR:** no number had been reserved on disk, so Task 11 chose a new ADR over a dated note on 0015, because this slice changes three things 0015 decided (when settling may start, the K6 exception, what a mark stores). It took the next free number, **0021** (`docs/learning/decisions/0021-settling-early-and-paying-differences.md`, checked against the folder and `decisions/README.md` the same day). ADR 0015 carries pointer notes.
+- **Before-production:** this spec's "§4 / §5 / §6" labels don't match `docs/before-production.md`'s sections (its §6 is "Privacy and legal"). The items went where they fit: honor system, idempotent retry, hidden undo notice, tolerance and rate limits in §4; Venmo links in §5; "Home data" merged into the existing `max_rows` item at the end of §6 (with review R7's note), not duplicated.

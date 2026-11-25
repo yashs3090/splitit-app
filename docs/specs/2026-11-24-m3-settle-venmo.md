@@ -36,6 +36,7 @@ Proposed by the coordinator; the user didn't object:
 - A payer change is logged in Activity.
 
 Recorded earlier: settling is never allowed while any item is unclaimed (M2 spec A2.2a, ADR 0014).
+*Changed 2026-11-25 by docs/specs/2026-11-25-settle-early-and-differences.md: on proportional bills, a person who has claimed an item may settle early (ADR 0021); even-mode bills still wait.*
 
 **Words in this spec:** the *payer* is the person who paid the restaurant and collects the money. *People who owe* are everyone else. A *mark* is one person's "I paid". The app never shows the word "payer"; it uses names ("Sam paid the bill", "Pay Sam").
 
@@ -95,6 +96,8 @@ Boundary cases. Both `supabase/tests/database/settle_marks.test.sql` and `lib/se
 | K4 | one row shared by 2 claimers, all other rows claimed | yes |
 | K5 | K1, then the host's `update_bill` adds a new row | no (1 row left) |
 | K6 | proportional, all rows $0.00, total > 0, all claimed | lib `blocked_all_zero`; DB complete, mark accepted (intentional; honor-system marks, no money effect. Review R2, M3-B-12) |
+
+*K6: Changed 2026-11-25 by docs/specs/2026-11-25-settle-early-and-differences.md: the DB now refuses the mark with `22023 all_zero` (K6 closed, ADR 0021).*
 
 **C2. The amount of a mark** (`settled_cents`, and `p_cents` of `mark_paid`).
 *Rule:* an integer from 1 to 99,999,999 inclusive (the `bills_total_cents_range` upper bound).

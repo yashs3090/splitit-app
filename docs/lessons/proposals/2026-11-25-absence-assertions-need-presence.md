@@ -2,7 +2,7 @@
 
 **Status: pending**
 
-**Targets:** `.claude/agents/implementer.md` (How to work); `.claude/agents/product-engineer.md` (§ Build); `.claude/agents/visual-designer.md` (How you work, Tests bullet); `.claude/agents/code-reviewer.md` (item 4, Tests)
+**Targets:** `.claude/agents/implementer.md` (How to work); `.claude/agents/product-engineer.md` (§ Build); `.claude/agents/visual-designer.md` (How you work, Tests bullet); `.claude/agents/code-reviewer.md` (item 4, Tests); `.claude/agents/supabase-engineer.md` (Change 5, added in the settle-early retro)
 
 **Promotion rule used:** the same lesson twice or more (testing area). This is the ninth check in the log that reported "absent" because it couldn't see what it was looking for. The positive-control rule already lives in `qa-tester` for greps; this is the first time it bit a unit test, and the agents that write unit tests don't have it.
 
@@ -65,6 +65,20 @@ New:
 tests that don't actually assert the behavior, including an absence assertion that never shows the region it searches was rendered in that state (a "not shown" check run with the section collapsed passes no matter what).
 ```
 (This phrase survives the pending `2026-11-24-parser-changes-differential-guard.md` and `2026-11-24-screen-open-effects-every-entry-route.md` changes to item 4, so it can be applied before or after them.)
+
+## Change 5 (added 2026-11-25, settle-early retro): `.claude/agents/supabase-engineer.md`, new bullet directly after the pgTAP-fixtures bullet
+
+Evidence: log 2026-11-25 "pgTAP 'settled_at unchanged' checks couldn't fail, because `now()` is fixed in a transaction" [testing]. Review R1 of docs/specs/2026-11-25-settle-early-and-differences.md: the checks would have passed even if `settled_at` was rewritten. They were fixed by backdating, and a mutation run proved it. This is the tenth check that couldn't fail, and the second `now()` finding (2026-11-24 "Activity order inside one edit is random…").
+
+Old (anchor; unchanged):
+```
+- pgTAP assertions filter to the rows the test created (fixture ids or a unique tag), never whole-table counts or selects. The local DB may hold the user's real data, because we apply migrations with `migration up` rather than `db:reset`. A test that only passes on an empty DB is a bug.
+```
+
+New (inserted directly after it):
+```
+- `now()` returns the same time for the whole test transaction, so an "unchanged" check on a timestamp (`settled_at`, `updated_at`) first sets it to a known past value, so a wrongful rewrite would show up. Every new "unchanged" or "nothing written" assertion is run once against a deliberately broken version of the function (then reverted) to show it can fail; say so in your report.
+```
 
 ## What this changes for you
 Tests that say "this is gone" will prove they were looking in the right place, so leftovers like the ▴/▾ arrows get caught by the test suite instead of by a reviewer reading the screen.

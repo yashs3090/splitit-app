@@ -42,10 +42,12 @@ New (inserted):
 
 New (inserted):
 ```
-- A message or remembered choice about a specific thing (an error for one payment, a dismissed notice) is stored with the ids and values it describes (person, amount, membership time) and shown only while they still match. Test it by changing one of them while it's showing. On a live bill they change under the screen.
+- A message, prompt or remembered choice about a specific thing (an error for one payment, a "Did you pay?" prompt, a dismissed notice) is stored with the facts that decide whether it's still true (the payer, whether the viewer is already marked, the membership time) and shown only while those match. Don't key it on details that can change while it stays true: a "Did you pay?" prompt keyed on the amount vanished when the share changed, though the person had already paid. Test both: change a deciding fact while it's showing (it goes), and change an incidental value such as the amount (it stays). On a live bill both change under the screen.
 ```
 
-What it changes for you: lines like "Couldn't open Venmo to pay Hana $12" disappear when the payer or amount changes, instead of describing a payment that no longer exists.
+**Reworded 2026-11-25 (settle-early retro).** The earlier wording ("ids and values it describes (person, amount, membership time)… shown only while they still match") caused a wrong result: `openedStillMatches` in `lib/settleView.ts` followed it and dropped the prompt when the amount changed (F3 in docs/specs/2026-11-25-settle-early-and-differences-eng.md; review R5 / SE-R-5). Evidence: log 2026-11-25 "A pending rule would have caused F3: the prompt was keyed on the amount" [expo].
+
+What it changes for you: lines like "Couldn't open Venmo to pay Hana $12" disappear when they stop being true (a different payer, or you're already marked paid), but a "Did you pay?" prompt doesn't vanish just because your share moved by a few cents.
 
 ## What this changes for you
 Two kinds of bugs found late in M3 (buttons stuck after a failed reload, and odd sentences like "All 1 marked paid") get tested while the screen is built, instead of turning up in review or QA.

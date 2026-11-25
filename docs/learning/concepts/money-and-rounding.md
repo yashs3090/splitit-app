@@ -107,15 +107,15 @@ A seeded property test checks it on 500 random complete bills in both modes, wit
 - Split evenly instead: extras 250 each, so Sam owes 1550.
 
 **When there's nothing to settle yet.** `settlePlan` returns a "blocked" result with no amounts at all:
-- `blocked`: some row has no claim. Same rule as `sharesComplete`, and the same rule the database uses (`private.bill_is_complete`). Showing no amounts keeps even mode's "totals hidden until everything is claimed".
-- `blocked_all_zero`: everything is claimed, but `computeShares` still has cents nobody carries (`unclaimedCents ≠ 0`). That only happens in proportional mode when every item is $0.00 and the total isn't, the same case as "When the Unclaimed line shows" above. The screen says "Every item is $0. Fix the prices, or switch to Split evenly." *(The database doesn't block this case; that difference is deliberate and tested as "K6", see ADR 0015.)*
+- `blocked`: some row has no claim. Same rule as `sharesComplete`, and the same rule the database uses (`private.bill_is_complete`). Showing no amounts keeps even mode's "totals hidden until everything is claimed". *(Updated 2026-11-25: on a proportional bill, an incomplete bill now gives the `early` plan instead, once the Settle screen asks for it. See "Paying early" below.)*
+- `blocked_all_zero`: everything is claimed, but `computeShares` still has cents nobody carries (`unclaimedCents ≠ 0`). That only happens in proportional mode when every item is $0.00 and the total isn't, the same case as "When the Unclaimed line shows" above. The screen says "Every item is $0. Fix the prices, or switch to Split evenly." *(Until 2026-11-25 the database didn't block this case: the deliberate "K6" difference in ADR 0015. Since [ADR 0021](../decisions/0021-settling-early-and-paying-differences.md) it does, with the same rule Z, so K6 is closed.)*
 
 **Roles.** Each non-payer gets a role from their `owedCents`:
 - above 0: `owes` (shown with a Pay button);
 - exactly 0: `nothing` ("You don't owe anything on this bill.");
 - below 0: `payer_owes_them`. *(Updated 2026-11-24: this can now also happen when someone claims a discount bigger than their items, in either mode; see E2 under "Claimable discounts" below.)* With split discounts it happens only in even mode with a big bill-level discount. Example: items 1000¢ and 0¢, total 800¢, so extras are −200¢, split evenly −100¢ each. The shares are 900¢ and **−100¢**: the payer owes that person $1.00. The screen says "Hana owes you $1.00. Settle that outside the app." with no link.
 
-**`markDiffCents`: the share changed after "I paid".** An "I paid" mark stores the amount the screen showed (`settled_cents`). Later the host might edit a price, or someone might unclaim, and the share moves. The mark keeps its old amount (the user's Q3 answer), and `settlePlan` adds two fields for each marked person:
+**`markDiffCents`: the share changed after "I paid".** *(Note 2026-11-25: this is how M3 worked. The screens now use `difference` instead, with buttons to settle it; see "Paying a difference" below. `markDiffCents` still exists in `lib/settle.ts` with the same meaning, but no screen reads it, and the "Sort out the $1.10" copy is gone.)* An "I paid" mark stores the amount the screen showed (`settled_cents`). Later the host might edit a price, or someone might unclaim, and the share moves. The mark keeps its old amount (the user's Q3 answer), and `settlePlan` adds two fields for each marked person:
 - `markDiffCents = owedCents − mark.cents` (signed whole cents);
 - `markDiffers = markDiffCents !== 0`.
 
@@ -144,6 +144,69 @@ The subtraction happens once, in `lib/settle.ts:90`, and the sentences are built
 | 12.5 | refused | can't happen (integer parameter) |
 
 Both sides test these same cases (the CLAUDE.md rule for money checks enforced in two places).
+
+*Note 2026-11-25:* `settle_difference` (below) takes two amounts. The "from" amount follows C2 exactly (1 to 99,999,999). The "to" amount may also be **0**, which means "paid back in full" and clears the mark. A stored mark is still never 0. The app's `settleDifference` refuses the same values before sending (`lib/bills.ts`).
+
+### Paying early: why proportional shares stay put (2026-11-25)
+*From spec `docs/specs/2026-11-25-settle-early-and-differences.md` (D1) and [ADR 0021](../decisions/0021-settling-early-and-paying-differences.md).*
+
+Since 2026-11-25, on a proportional bill you can pay as soon as you've claimed at least one item, without waiting for everyone else. That's only safe if your amount won't change when *other* people claim. Here's why it doesn't.
+
+**The key fact: the weights always add up to the same number.** Proportional extras are spread over `[each person's items, Unclaimed items]` (see "Proportional mode" above). Add those weights up and you get the sum of every item row on the bill, whoever has claimed what. When Dee claims the Dessert, 500¢ of weight moves from the Unclaimed slot to Dee's slot. The total weight doesn't change, and neither does Sam's weight (his own items). So Sam's exact share of the extras, `extras × Sam's items ÷ all items`, stays the same.
+
+The one thing that can move is **rounding**. Largest-remainder rounding hands out the spare cents by comparing everyone's fractions, and when the Unclaimed slot is split between new people, the spare cent can land somewhere else.
+
+**Worked example (a tiny 7¢ fee, so the arithmetic stays small).** Burger 2500¢ (Hana), Salad 3500¢ (Sam), two Desserts 2000¢ each that nobody has claimed. Total 10,007¢, so extras are 7¢. Weights add up to 10,000.
+
+| | Hana (2500) | Sam (3500) | Unclaimed (4000) | Dee (2000) | Eve (2000) |
+|---|---|---|---|---|---|
+| Exact extras, before | 1.75 | 2.45 | 2.80 | | |
+| Rounded, before | 1 + 1 = **2** | **2** | 2 + 1 = **3** | | |
+| Exact extras, after Dee and Eve claim a Dessert each | 1.75 | 2.45 | | 1.40 | 1.40 |
+| Rounded, after | 1 + 1 = **2** | 2 + 1 = **3** | | **1** | **1** |
+
+Before: rounding down gives 1 + 2 + 2 = 5, so 2 cents are spare. They go to the two largest fractions: Unclaimed (.80) and Hana (.75). Sam pays 3502¢ if he pays early.
+
+After: rounding down gives 1 + 2 + 1 + 1 = 5, and the 2 spare cents go to Hana (.75) and Sam (.45), because Dee's and Eve's fractions (.40) are smaller. Sam's share is now 3503¢: **1¢ more**, though he did nothing.
+
+That 1¢ is the most rounding can move it. A seeded property test checks this: it takes random early bills, lets **other** people claim, unclaim, change splits and join in random orders (up to 12 steps) until the bill is complete, and checks the early payer's share moved by **at most 1¢ in total**, and by exactly 0 when their items add up to $0 (`lib/settle.test.ts`, criterion 17c, "other people's actions, run to completion").
+
+**Why this doesn't work in even mode.** In even mode, extras are divided among the people who have claimed something. When Dee claims her first item, the tip is split three ways instead of two, and Sam's share drops by a lot more than a cent. So even-mode bills still wait until every item is claimed.
+
+**What *can* still change your early share** (spec D1, causes W1–W9). These aren't rounding, so they can be any size:
+- someone joins an item you claimed, or changes its split (your piece of that item shrinks or grows);
+- you claim or unclaim something yourself;
+- the host edits prices, tax, tip or the total, or adds or removes a row;
+- the host switches to "Split evenly" (the bill goes back to waiting, and your mark stays);
+- someone claims a claimable discount you share;
+- someone sharing your item leaves or is removed;
+- the host changes who gets paid (every mark is cleared, as before).
+
+That's why the early card says "Your share may change until everything is claimed (1 item left)", and why differences exist.
+
+### Paying a difference (2026-11-25)
+When your share moves after you've marked "I paid", the plan gives you a `difference` (`differenceFor` and `differenceOf` in `lib/settle.ts`). With your mark at `mark` and your share at `owed`:
+1. `target = max(owed, 0)`. A share below $0 is only paid back down to $0; the rest stays "settle that outside the app" (decision SE-12).
+2. `delta = target − mark`.
+3. If `|delta| ≤ SETTLE_DIFF_IGNORE_CENTS` (1¢): no difference.
+4. If `delta > 0`: `{ kind: 'more', cents: delta }`. You owe the payer more.
+5. If `delta < 0`: `{ kind: 'back', cents: −delta }`. The payer owes you that much back.
+
+Sam is marked at 1510¢:
+
+| Sam's share now | `difference` | What happens once the bill is complete |
+|---|---|---|
+| 1620¢ | more 110 | Sam: "Pay Hana $1.10 more on Venmo", then "I paid the difference" (mark becomes 1620) |
+| 1511¢ | none (within 1¢) | nothing; Sam's card just says "Marked paid" |
+| 1400¢ | back 110 | Hana: "Pay $1.10 back", then "I paid it back" (mark becomes 1400) |
+| 0¢ | back 1510 | Hana pays back the whole 1510; the mark is **cleared**, not set to 0 |
+| −100¢ | back 1510 | as above, plus "Hana also owes you $1.00 for your share. Settle that outside the app." |
+
+**The mark is the net amount.** After those steps, `settled_cents` holds what has been settled overall (marked + paid more − paid back). The card shows one number, and Activity keeps each step ("Sam paid Hana $1.10 more").
+
+**The 1¢ tolerance.** `SETTLE_DIFF_IGNORE_CENTS = 1` (a starting value, decision SE-11; waiting for the user's review). It exists because of the rounding cent above: without it, Sam in the worked example would be asked to send Hana $0.01. The cost: a payer can end up 1¢ short or over per person. Set it to 0 and every cent shows (a test does exactly that through `differenceFor`'s third argument).
+
+**Why the database has no tolerance, and why that isn't two different money rules.** The database never compares a mark with a share. It can't: shares come from `computeShares`, which exists only in `lib/`. `settle_difference` just records "from X to Y", checking that X is the current mark and that Y is a valid amount. So a direct API call that records a 1¢ difference is accepted (case D5). The tolerance is only about which differences the app *asks* people to settle, not a rule about which amounts are valid. The rules that both sides do enforce (rule E for who may pay, rule Z for all-$0 bills, the C2 amount range) are written in both places and tested on the same cases.
 
 ### Claimable discounts (ADR 0017, 2026-11-24)
 A bill-level discount is normally an extra, so it lowers everyone's share. But some discounts belong to one person: a comp on their meal, a coupon they brought. So each discount row in the bill form has a switch, **"Claim like an item"** (off by default). When it's on, the discount becomes a bill row that people claim and share by parts, exactly like an item ([ADR 0017](../decisions/0017-claimable-discounts.md)).
@@ -228,6 +291,10 @@ It's the same integer string math as the receipt parser: a regex splits dollars 
 - Storing a claimable discount as a positive number and "remembering" to subtract it. Every place that sums rows would need to know. Stored negative, `total − Σ rows` just works.
 - Assuming a share is never negative. Since ADR 0017, a claimed coupon can make it negative in either mode. Code that formats, caps or sums shares must handle it (the Settle screen does, with `payer_owes_them`).
 - Forgetting the unclaimed discount when adding up "Unclaimed". It's `unclaimedItemsCents + unclaimedDiscountCents + unclaimedExtrasCents`; leave one out and the screen stops adding up (E4).
+- Letting people pay early in even mode. Every new claimer changes everyone's even share, so an early amount would be wrong by much more than a cent.
+- Expecting an early share to be *exactly* stable. Rounding can move it by 1¢ (the worked example above). Code that compares a mark with a share needs the 1¢ tolerance, or it asks people to send $0.01.
+- Storing a $0 mark for "paid back in full". It would need its own card, couldn't be undone, and would stop the person leaving the bill. Clear the mark instead; Activity keeps the history.
+- Paying back more than the mark when a share goes negative. Pay-backs stop at $0; the rest is settled outside the app.
 
 ## Check yourself
 1. Allocate a 1000¢ tip across subtotals 2000¢, 1000¢, 1000¢.
@@ -247,6 +314,9 @@ It's the same integer string math as the receipt parser: a regex splits dollars 
 15. In E1, why does Sam's share go *up* (from 765¢ to 1512¢) when Hana's comp is switched from Split to "Claim like an item"? Where did the difference go?
 16. A bill has a $20.00 burger (Sam), a $10.00 pasta (Hana) and a −$4.00 claimable coupon claimed by Hana. Tax is $3.00 and the bill is in proportional mode. What are the weights for the tax, and why isn't Hana's weight 600?
 17. Cy claims only the coupon on an even-mode bill. Does Cy pay a share of the tip? What would go wrong if a claim on a discount counted?
+18. On a proportional bill, Sam paid early. Dee then claims the last unclaimed item. Why does Sam's share stay the same (or move by at most 1¢)? What would happen on an even-mode bill?
+19. Sam marked $15.10 and his share is now $15.11. Why doesn't the app ask him to pay 1¢, and what does the database do if a script records 1510 → 1511 anyway?
+20. Sam marked $15.10, and after a coupon his share is −$1.00. How much does Hana pay back through the app, what happens to Sam's mark, and what happens to the other $1.00?
 
 ## Learn more
 - Largest remainder method: https://en.wikipedia.org/wiki/Largest_remainder_method
