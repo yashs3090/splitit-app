@@ -125,8 +125,9 @@ const MY_BILLS_LIMIT = 20;
 const SETTLE_DATA_MAX_BILLS = MY_BILLS_LIMIT;
 /**
  * PostgREST cuts every response at `max_rows` without an error (1000 locally, supabase/config.toml;
- * verify the hosted project's setting). fetchSettleData asks for rows 0..999 and treats a full page
- * as a cut-off list (A1, SE-ENG-9).
+ * verify the hosted project's setting). fetchSettleData asks for rows 0..999 with an exact count and
+ * treats a response with fewer rows than its count (any lower max_rows; review R7), a missing count,
+ * or a full page as a cut-off list (A1, SE-ENG-9).
  */
 const SETTLE_DATA_ROW_CAP = 1000;
 
@@ -613,6 +614,8 @@ export async function leaveBill(billId: string): Promise<BillResult> {
 // ---------------------------------------------------------------------------
 
 type Raw = { data: unknown; error: unknown };
+/** A read made with `{ count: 'exact' }`: supabase-js adds the total number of matching rows. */
+type CountedRaw = Raw & { count?: number | null };
 
 /**
  * The bill (with its payer), its unit rows (ordered by group_position, unit_index), participants
@@ -715,8 +718,9 @@ function groupByBill(data: unknown, ids: ReadonlySet<string>): Map<string, unkno
  * 0..999.
  *
  * - `[]` makes no request. More than 20 ids, or an id that isn't a UUID: invalid_bill, no request.
- * - Any request failing, or returning 1,000 rows or more (PostgREST's max_rows cut it off without
- *   an error), fails the whole call: a cut-off list would give a wrong "You owe $X".
+ * - Any request failing, returning fewer rows than its exact count or no count (PostgREST's max_rows
+ *   cut it off without an error, whatever max_rows is; review R7), or returning 1,000 rows or more
+ *   (second guard), fails the whole call: a cut-off list would give a wrong "You owe $X".
  * - A row with no bill_id, or one for a bill that wasn't asked for, fails the whole call (it could
  *   belong to any bill).
  * - Each bill is parsed on its own: a bill whose rows don't parse, that RLS didn't return, or whose
@@ -731,13 +735,16 @@ export async function fetchSettleData(billIds: readonly string[]): Promise<BillR
   const ids = [...new Set(billIds)];
   if (ids.length === 0) return { ok: true, bills: new Map() };
   const last = SETTLE_DATA_ROW_CAP - 1;
-  let results: [Raw, Raw, Raw, Raw];
+  // An exact count with each read: Postgres counts every matching row, so a response cut by a
+  // max_rows below 1,000 has fewer rows than its count (R7).
+  const exact = { count: 'exact' } as const;
+  let results: [CountedRaw, CountedRaw, CountedRaw, CountedRaw];
   try {
     results = await Promise.all([
-      supabase.from('bills').select(BILL_COLUMNS).in('id', ids).range(0, last),
+      supabase.from('bills').select(BILL_COLUMNS, exact).in('id', ids).range(0, last),
       supabase
         .from('line_items')
-        .select(`${ROW_COLUMNS}, bill_id`)
+        .select(`${ROW_COLUMNS}, bill_id`, exact)
         .in('bill_id', ids)
         .order('bill_id', { ascending: true })
         .order('group_position', { ascending: true })
@@ -745,18 +752,23 @@ export async function fetchSettleData(billIds: readonly string[]): Promise<BillR
         .range(0, last),
       supabase
         .from('bill_participants')
-        .select(`${PARTICIPANT_COLUMNS}, bill_id`)
+        .select(`${PARTICIPANT_COLUMNS}, bill_id`, exact)
         .in('bill_id', ids)
         .order('joined_at', { ascending: true })
         .range(0, last),
-      supabase.from('claims').select(`${CLAIM_COLUMNS}, bill_id`).in('bill_id', ids).range(0, last),
+      supabase.from('claims').select(`${CLAIM_COLUMNS}, bill_id`, exact).in('bill_id', ids).range(0, last),
     ]);
   } catch {
     return fail('network');
   }
   const failed = results.find((r) => r.error);
   if (failed) return fail(mapError('read', failed.error));
-  if (results.some((r) => !Array.isArray(r.data) || r.data.length >= SETTLE_DATA_ROW_CAP)) return fail('network');
+  const cutOff = (r: CountedRaw) =>
+    !Array.isArray(r.data) ||
+    typeof r.count !== 'number' ||
+    r.data.length < r.count ||
+    r.data.length >= SETTLE_DATA_ROW_CAP;
+  if (results.some(cutOff)) return fail('network');
 
   const [billsRes, rowsRes, participantsRes, claimsRes] = results;
   const wanted = new Set(ids);

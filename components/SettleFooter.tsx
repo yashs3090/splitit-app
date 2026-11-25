@@ -81,11 +81,11 @@ export function SettleFooter({
           />
           {action.caption !== null ? (
             <View style={[styles.caption, styles.grow]}>
-              {/* "Marked paid" is a success: icon + words (P3). "N left to claim" stays plain. */}
-              {action.caption === SETTLE_COPY.markedPaid ? <ToneIcon tone="success" color={colors.textMuted} /> : null}
+              {/* A mark confirmation is a success: icon + words (P3). "N left to claim" stays plain. */}
+              {action.tone === 'success' ? <ToneIcon tone="success" color={colors.textMuted} /> : null}
               <Text
-                // Only the mark confirmation is announced; "N left to claim" would speak on every claim tap.
-                accessibilityLiveRegion={action.caption === SETTLE_COPY.markedPaid ? 'polite' : 'none'}
+                // Only what lib marks live is announced; "N left to claim" would speak on every claim tap.
+                accessibilityLiveRegion={action.live === true ? 'polite' : 'none'}
                 style={[muted, styles.shrink]}
               >
                 {action.caption}

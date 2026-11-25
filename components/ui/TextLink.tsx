@@ -1,7 +1,7 @@
 // TextLink: a quiet text action inside a form or card ("Add note", "Tip options", "Make a new link"),
 // with a full 44-pt touch target. One step quieter than a ghost Button: caption size, primary color.
 import type { LucideIcon } from 'lucide-react-native';
-import { Pressable, StyleSheet, Text, type StyleProp, type ViewStyle } from 'react-native';
+import { Pressable, StyleSheet, Text, type AccessibilityState, type StyleProp, type ViewStyle } from 'react-native';
 
 import { opacity, radius, space, TOUCH_TARGET, type, useTheme } from '@/lib/theme';
 
@@ -14,12 +14,14 @@ type Props = {
   /** Defaults to the visible label; pass one when the label needs context ("Add note to item 2"). */
   accessibilityLabel?: string;
   accessibilityHint?: string;
+  /** E.g. `{ expanded }` when the link shows and hides something ("Show QR code"). */
+  accessibilityState?: AccessibilityState;
   /** Optional leading icon (e.g. Plus), 16 pt, in the link color. */
   icon?: LucideIcon;
   style?: StyleProp<ViewStyle>;
 };
 
-export function TextLink({ label, onPress, accessibilityLabel, accessibilityHint, icon, style }: Props) {
+export function TextLink({ label, onPress, accessibilityLabel, accessibilityHint, accessibilityState, icon, style }: Props) {
   const { colors } = useTheme();
   const { focusProps, ringStyle } = useFocusRing();
   return (
@@ -27,6 +29,7 @@ export function TextLink({ label, onPress, accessibilityLabel, accessibilityHint
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel}
       accessibilityHint={accessibilityHint}
+      accessibilityState={accessibilityState}
       onPress={onPress}
       {...focusProps}
       style={({ pressed }) => [styles.link, pressed && styles.pressed, ringStyle, style]}

@@ -5,6 +5,7 @@ import { render } from '@testing-library/react-native';
 import { router as globalRouter } from 'expo-router';
 import { act, fireEvent, renderRouter, screen, waitFor, within } from 'expo-router/testing-library';
 import Check from 'lucide-react-native/icons/check';
+import ChevronDown from 'lucide-react-native/icons/chevron-down';
 import ChevronUp from 'lucide-react-native/icons/chevron-up';
 import { AppState, Platform, StyleSheet, type AppStateStatus } from 'react-native';
 
@@ -660,8 +661,9 @@ describe('claimable discounts on the bill screen (criteria 48–53)', () => {
     useE1();
     db.claims = [claim(STEAK, A), claim(SALAD, B)];
     await openAt('Total $16.40');
-    // R1 (Amendment A1): only the discount is left, so the copy says "discount".
-    expect(screen.getByText('1 discount left to claim')).toBeTruthy();
+    // R1 (Amendment A1): only the discount is left, so the copy says "discount". Settle early (Task 6,
+    // E16): the viewer has an item claim on a proportional bill, so the footer says they can pay now.
+    expect(screen.getByText('You can pay now · 1 discount left to claim')).toBeTruthy();
     expect(screen.queryByText(/item left to claim/)).toBeNull();
     await expand();
     expect(screen.getByLabelText('Hana Lee $17.31')).toBeTruthy();
@@ -716,6 +718,8 @@ describe('Settle up entry in the footer (M3 criterion 54, brief §7)', () => {
 
   it('incomplete: secondary "Settle up" with the exact count, and it still opens Settle up', async () => {
     db.claims = STATE_A(); // Fries and Beer 1 claimed: 2 rows left
+    // Task 6: a proportional bill would be an early plan (the viewer can pay now); even mode stays blocked.
+    db.bill = { ...db.bill, extras_split: 'equal' };
     const router = await openBill();
     const settle = screen.getByLabelText('Settle up');
     expect(screen.getByText('2 items left to claim')).toBeTruthy();
@@ -729,6 +733,7 @@ describe('Settle up entry in the footer (M3 criterion 54, brief §7)', () => {
 
   it('incomplete with one row left: singular', async () => {
     db.claims = [claim(BURGER, A), claim(FRIES, B), claim(BEER1, B)];
+    db.bill = { ...db.bill, extras_split: 'equal' }; // Task 6: see above
     await openBill();
     expect(screen.getByText('1 item left to claim')).toBeTruthy();
   });
@@ -748,6 +753,83 @@ describe('Settle up entry in the footer (M3 criterion 54, brief §7)', () => {
     await waitFor(() => expect(router.getPathname()).toBe(`/bills/${BILL}/settle`));
     await screen.findByText('Settle up', { exact: true });
     await screen.findByText(/paid the bill$/);
+  });
+});
+
+// Settle early and differences (docs/specs/2026-11-25-settle-early-and-differences.md), criterion 43:
+// the footer's captions on an early (proportional, incomplete) bill and with a difference.
+describe.each(['ios', 'web'] as const)('Settle up footer, early and differences (%s; criterion 43)', (os) => {
+  const background = (label: string) =>
+    (StyleSheet.flatten(screen.getByLabelText(label).props.style) as { backgroundColor?: string }).backgroundColor;
+  const markB = (cents: number) => {
+    db.participants = db.participants.map((p) =>
+      p.user_id === B ? { ...p, settled_at: '2026-11-20T21:00:00Z', settled_cents: cents } : p,
+    );
+  };
+
+  beforeEach(() => {
+    jest.replaceProperty(Platform, 'OS', os);
+    db.participants = db.participants.map((p) =>
+      p.user_id === A ? { ...p, profile: { display_name: 'Hana Lee', venmo_username: 'hana-1' } } : p,
+    );
+    // Proportional; Beer 2 is the only row left, and Bo (the viewer) has claimed items: an early plan.
+    db.claims = [claim(BURGER, A), claim(FRIES, B), claim(BEER1, B)];
+  });
+
+  it('early, Bo owes: primary "Settle up" with "You can pay now · 1 item left to claim", opening Settle up', async () => {
+    const router = await openBill();
+    expect(screen.getByText('You can pay now · 1 item left to claim')).toBeTruthy();
+    const settle = screen.getByLabelText('Settle up');
+    expect(settle.props.accessibilityHint).toBe('You can pay your share now. 1 item left to claim');
+    expect(background('Settle up')).toBe(colors.light.primary);
+    // Still no Pay in the footer before the bill is complete (SE-9).
+    expect(screen.queryByLabelText(/^Pay /)).toBeNull();
+    // Not a live region: it would speak on every claim tap.
+    expect(screen.getByText('You can pay now · 1 item left to claim').props.accessibilityLiveRegion).toBe('none');
+    fireEvent.press(settle);
+    await waitFor(() => expect(router.getPathname()).toBe(`/bills/${BILL}/settle`));
+    expect(await screen.findByText('Your share may change until everything is claimed (1 item left).')).toBeTruthy();
+  });
+
+  it('early, two rows left: the count follows the plural', async () => {
+    db.claims = [claim(FRIES, B), claim(BEER1, B)];
+    await openBill();
+    expect(screen.getByText('You can pay now · 2 items left to claim')).toBeTruthy();
+  });
+
+  it('early, Bo marked: secondary "Settle up" with "Marked paid · 1 item left to claim"', async () => {
+    markB(1000);
+    await openBill();
+    expect(screen.getByText('Marked paid · 1 item left to claim')).toBeTruthy();
+    expect(background('Settle up')).toBe(colors.light.primarySurface);
+    expect(screen.getByText('Marked paid · 1 item left to claim').props.accessibilityLiveRegion).toBe('none');
+  });
+
+  it('ready, more due: primary "Settle up" with "You owe Hana Lee $1.10 more"', async () => {
+    db.claims = STATE_B(); // complete; Bo's share is $12.80
+    markB(1170);
+    await openBill();
+    expect(screen.getByText('You owe Hana Lee $1.10 more')).toBeTruthy();
+    expect(screen.getByLabelText('Settle up').props.accessibilityHint).toBe('See the difference and settle it');
+    expect(background('Settle up')).toBe(colors.light.primary);
+  });
+
+  it('ready, back due: primary "Settle up" with "Hana Lee owes you $1.10 back"', async () => {
+    db.claims = STATE_B();
+    markB(1390);
+    await openBill();
+    expect(screen.getByText('Hana Lee owes you $1.10 back')).toBeTruthy();
+    expect(background('Settle up')).toBe(colors.light.primary);
+  });
+
+  it('ready, the payer with one difference: "1 difference to settle"', async () => {
+    const session = fakeSession('Hana');
+    supabase.__setInitialSession({ ...session, user: { ...session.user, id: A } });
+    db.claims = STATE_B();
+    markB(1390);
+    await openBill();
+    expect(screen.getByText('1 difference to settle')).toBeTruthy();
+    expect(background('Settle up')).toBe(colors.light.primary);
   });
 });
 
@@ -1208,28 +1290,28 @@ describe.each(['ios', 'web'] as const)('pay from the footer (%s)', (os) => {
     expect(screen.getByLabelText('Settle up')).toBeTruthy();
   });
 
-  it('R2: … and when the share changes (Pay shows the new amount, no old line)', async () => {
+  it('R2: … and when the share changes (the old "Send $12.80" line goes; the prompt stays, contract O)', async () => {
     openLink.mockImplementation(async () => ({ ok: false }));
     await openBill();
     fireEvent.press(screen.getByLabelText(PAY_A11Y));
     expect(await screen.findByText(/^Couldn't open Venmo\. Send \$12\.80/)).toBeTruthy();
     db.claims = [...STATE_B(), claim(BURGER, B)];
     await live();
-    expect(await screen.findByLabelText(/^Pay Hana Lee/)).toBeTruthy();
-    expect(screen.queryByText(/^Couldn't open Venmo/)).toBeNull();
-    expect(screen.queryByText('Did you pay Hana Lee?')).toBeNull();
+    await waitFor(() => expect(screen.queryByText(/^Couldn't open Venmo/)).toBeNull());
+    // Task 6 (contract O, A1.6): the person may have sent $12.80 another way, so "Did you pay?" stays.
+    expect(screen.getByText('Did you pay Hana Lee?')).toBeTruthy();
   });
 
-  it('R3: while "Did you pay?" shows, a live share change goes back to Pay with the new amount', async () => {
+  it('R3 (contract O, A1.6): while "Did you pay?" shows, a live share change keeps the prompt', async () => {
     await openBill();
     fireEvent.press(screen.getByLabelText(PAY_A11Y));
     expect(await screen.findByText('Did you pay Hana Lee?')).toBeTruthy();
+    const before = billFetches();
     db.claims = [...STATE_B(), claim(BURGER, B)];
     await live();
-    await waitFor(() => expect(screen.queryByText('Did you pay Hana Lee?')).toBeNull());
-    const pay = screen.getByLabelText(/^Pay Hana Lee/);
-    expect(pay.props.accessibilityLabel).toBe(`Pay Hana Lee ${await yourShare()} on Venmo, to @hana-1`);
-    expect(pay.props.accessibilityLabel).not.toBe(PAY_A11Y);
+    await waitFor(() => expect(billFetches()).toBeGreaterThan(before));
+    expect(screen.getByText('Did you pay Hana Lee?')).toBeTruthy();
+    expect(screen.queryByLabelText(/^Pay Hana Lee/)).toBeNull();
   });
 
   it('R3: while "Did you pay?" shows, a live payer change (to B) gives "Settle up" and no prompt', async () => {
@@ -1243,6 +1325,25 @@ describe.each(['ios', 'web'] as const)('pay from the footer (%s)', (os) => {
     expect(screen.queryByLabelText('I paid')).toBeNull();
   });
 
+  it('review R5 (criterion 59): the host adds a row while B is in Venmo; on return the footer still asks and records $12.80', async () => {
+    markRpc();
+    await openBill();
+    fireEvent.press(screen.getByLabelText(PAY_A11Y));
+    expect(await screen.findByText('Did you pay Hana Lee?')).toBeTruthy();
+    // The host adds Dessert: the bill is no longer complete, but B has claims, so it's early, not blocked.
+    db.rows = [...db.rows, row('22222222-0000-4000-8000-000000000005', 'Dessert', 500, 3)];
+    db.bill = { ...db.bill, total_cents: 4980 };
+    await live();
+    expect(await screen.findByLabelText('Claim Dessert')).toBeTruthy(); // the refetch with the new row has landed
+    // Contract O: the prompt stays, not "You can pay now · 1 item left to claim".
+    expect(screen.getByText('Did you pay Hana Lee?')).toBeTruthy();
+    expect(screen.queryByText('You can pay now · 1 item left to claim')).toBeNull();
+    fireEvent.press(screen.getByLabelText('I paid'));
+    expect(await screen.findByText('Marked paid · 1 item left to claim')).toBeTruthy();
+    expect(markCalls()).toEqual([['mark_paid', { p_bill_id: BILL, p_payer_id: A, p_cents: 1280 }]]);
+    expect(screen.queryByText('Did you pay Hana Lee?')).toBeNull();
+  });
+
   it('R3: I paid waits while B\'s claim is saving in the "Did you pay?" state', async () => {
     let resolve: (r: FakeResult) => void = () => {};
     supabase.__setRpc((fn) => (fn === 'set_claim' ? new Promise<FakeResult>((r) => (resolve = r)) : { data: null, error: null }));
@@ -1254,11 +1355,11 @@ describe.each(['ios', 'web'] as const)('pay from the footer (%s)', (os) => {
     fireEvent.press(screen.getByLabelText('I paid'));
     expect(markCalls()).toHaveLength(0);
     expect(disabled('Not yet')).toBe(false);
-    // The claim lands: the share changed, so the prompt no longer matches and Pay comes back.
+    // The claim lands: the share changed, but the prompt stays (contract O, Task 6) and I paid comes back.
     db.claims = [...STATE_B(), claim(BURGER, B)];
     await act(async () => resolve({ data: null, error: null }));
-    await waitFor(() => expect(screen.queryByText('Did you pay Hana Lee?')).toBeNull());
-    await waitFor(() => expect(screen.getByLabelText(/^Pay Hana Lee/).props.accessibilityState?.disabled).toBe(false));
+    await waitFor(() => expect(disabled('I paid')).toBe(false));
+    expect(screen.getByText('Did you pay Hana Lee?')).toBeTruthy();
   });
 
   async function yourShare(): Promise<string> {
@@ -1314,5 +1415,21 @@ describe('visual pass V12/V13', () => {
     expect(screen.queryByText(/[▴▾]/)).toBeNull();
     fireEvent.press(screen.getByLabelText('Claim Fries'));
     expect(await screen.findByRole('alert', { name: "Couldn't save your claim. Try again." })).toBeTruthy();
+  });
+
+  // Review R3: the "no glyph" check must run where the toggles are rendered. Expanded, as the host,
+  // the extras control ("Change" / "Done") is on screen, so the absence assertions can fail.
+  it('expanded as the host: the extras toggle shows chevrons, never ▴/▾, closed and open', async () => {
+    signIn(A);
+    await openBill();
+    await expand();
+    const extras = screen.getByLabelText('How tax and tip are split'); // positive control: the region is there
+    expect(within(extras).getByText('Change', { includeHiddenElements: true })).toBeTruthy();
+    expect(screen.UNSAFE_queryAllByType(ChevronDown).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/[▴▾]/, { includeHiddenElements: true })).toBeNull();
+    fireEvent.press(extras);
+    expect(within(screen.getByRole('button', { name: 'How tax and tip are split' })).getByText('Done', { includeHiddenElements: true })).toBeTruthy();
+    expect(screen.getByText('Split evenly')).toBeTruthy(); // the options are open
+    expect(screen.queryByText(/[▴▾]/, { includeHiddenElements: true })).toBeNull();
   });
 });

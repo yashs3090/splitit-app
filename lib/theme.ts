@@ -79,6 +79,12 @@ export const googleButtonColors = {
   dark: { fill: '#131314', stroke: '#8E918F', text: '#E3E3E3' },
 } as const;
 
+/**
+ * QR code colors, the same in light and dark mode: phone cameras read dark modules on a light
+ * quiet zone, and many can't read an inverted code. Used only by components/InviteQr.tsx.
+ */
+export const qrColors = { module: '#111827', background: '#FFFFFF' } as const;
+
 /** 4-pt spacing scale. */
 export const space = { xs: 4, sm: 8, md: 12, lg: 16, xl: 24, xxl: 32 } as const;
 

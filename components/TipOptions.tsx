@@ -182,16 +182,19 @@ function Chip({
       {...focusProps}
       style={({ pressed }) => [
         styles.chip,
-        { borderColor: colors.border, backgroundColor: colors.surface },
-        selected && { backgroundColor: colors.primarySurface, borderColor: colors.primary },
+        // Tonal, no outline (outlines are for inputs). Selected is solid teal (≥5:1 against the card
+        // and the muted chips) and heavier, so it reads by more than hue.
+        { backgroundColor: selected ? colors.primary : colors.surfaceMuted },
         pressed && styles.pressed,
         disabled && styles.disabled,
         ringStyle,
       ]}
     >
-      <Text style={[type.caption, styles.chipTop, { color: selected ? colors.primary : colors.text }]}>{top}</Text>
+      <Text style={[type.caption, { color: selected ? colors.onPrimary : colors.text, fontWeight: selected ? '700' : '600' }]}>
+        {top}
+      </Text>
       {bottom !== undefined ? (
-        <Text style={[type.caption, tabularNums, { color: selected ? colors.primary : colors.textMuted }]}>{bottom}</Text>
+        <Text style={[type.caption, tabularNums, { color: selected ? colors.onPrimary : colors.textMuted }]}>{bottom}</Text>
       ) : null}
     </Pressable>
   );
@@ -209,11 +212,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: space.xs,
     paddingVertical: space.xs,
-    borderWidth: 1,
     borderRadius: radius.sm,
     borderCurve: 'continuous',
   },
-  chipTop: { fontWeight: '700' },
   customRow: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
   equals: { minWidth: 72, textAlign: 'right' },
   right: { textAlign: 'right' },

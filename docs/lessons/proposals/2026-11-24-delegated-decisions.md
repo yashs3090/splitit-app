@@ -14,6 +14,8 @@
 
 - 2026-11-25, Venmo note and Request buttons slices (no separate log entry; the pattern held): VN-1 … VN-11 and VR-1 … VR-18, VR-R1 … VR-R6 were decided and logged without a stop. VR-5 (what the payer can collect in one tap) was built and marked "Money: needs your look", and VN-8 (item names on by default in Venmo notes) was raised in `docs/before-production.md` as "needs your look". Both follow option (b) below, and the "Privacy:" wording in Change 1 would cover VN-8.
 
+- 2026-11-25 "Delegated decisions, fifth time: a decision listed two options and missed a third" [process] (added in the visual-pass retro): the main session decided VP-M1, VP-M2 and VP-M3 without stopping and raised P13 to the user, as this proposal describes. Review R11 found VP-M3 weighed "intercept back or not" and left out intercepting Android's `BackHandler` only. Suggested addition to Change 1, at the end of the new bullet: "When a decision is about platform behavior, the alternatives include the per-platform options (native only, Android only, web only)."
+
 ## Your choice before applying (added 2026-11-24, claimable-discounts retro)
 Change 1 says money decisions "still go to the user as open questions", and build-task step 1 then stops to ask you. In claimable discounts the PM didn't stop on CD-6: it built the option that's easiest to change and flagged it. Pick one:
 - **(a) Keep Change 1 as written.** Money questions stop the build until you answer, even when you've said to keep building.

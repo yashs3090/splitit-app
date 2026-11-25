@@ -1,6 +1,6 @@
 # 0015: Settling: one payer per bill, self-reported "I paid" marks, Venmo links
 
-**Status:** Accepted (2026-11-24, spec `docs/specs/2026-11-24-m3-settle-venmo.md` and its Amendment A1). Amends [0007](0007-payment-deep-links.md). Note 2026-11-25 (§8): the payer can send Venmo requests, and owers can pay from the bill screen; marks unchanged.
+**Status:** Accepted (2026-11-24, spec `docs/specs/2026-11-24-m3-settle-venmo.md` and its Amendment A1). Amends [0007](0007-payment-deep-links.md). Note 2026-11-25 (§8): the payer can send Venmo requests, and owers can pay from the bill screen; marks unchanged. **Amended by [0021](0021-settling-early-and-paying-differences.md) (2026-11-25):** on proportional bills people can pay once they've claimed an item; a mark is now the net amount settled (a pay-back to $0 clears it); differences get buttons through `settle_difference`; K6 is closed. The text below is kept as decided on 2026-11-24.
 
 ## Context
 M3 is the "settle up" step. Every item on the bill is claimed, so every person's share is known. Now money has to reach the person who paid the restaurant.
@@ -67,6 +67,8 @@ The screen sends what it was showing, and the database refuses if that's no long
 ### 6. Known gaps, accepted on purpose
 These are recorded so nobody "discovers" them later and thinks they're bugs.
 
+> *Note 2026-11-25: K6 is closed by [ADR 0021](0021-settling-early-and-paying-differences.md). The database now refuses a mark on this bill with `22023 all_zero` (rule Z), the same as the app. The K6 test in `settle_marks.test.sql` now expects that refusal. The paragraph below describes the gap as it was.*
+
 **K6: the all-$0 bill.** Picture a proportional bill where every item is $0.00 but the total is $5.00 (all tax). Every item is claimed. Tax is split by item subtotals, and every subtotal is 0, so nobody can carry the tax.
 - The app says the bill can't be settled (`blocked_all_zero`, "Every item is $0. Fix the prices, or switch to Split evenly."). It shows no Pay or "I paid" buttons.
 - The database's completeness rule only asks "does every row have a claim?", so it says the bill is complete, and `mark_paid` would accept a mark.
@@ -127,7 +129,7 @@ So 0007 is marked "Amended by 0015", not superseded.
 - The app still never touches card or bank data, and there's still no custom backend: everything is SQL functions in Supabase plus pure code in `lib/`.
 - "Paid" stays an honor system. `settled_cents` comes from the client, and the database checks only that it's a sensible number (C2). The app should say so in its help text (`docs/before-production.md` §6).
 - A host can change the payer late and clear people's marks. The confirm and the Activity log make that visible, not silent.
-- Amounts can change after someone marks (the host edits, someone unclaims). The mark keeps its original amount, and the screen shows the difference ("Your share is now $16.20. Sort out the $1.10 with Hana.") using `markDiffCents` from `lib/settle.ts`.
+- Amounts can change after someone marks (the host edits, someone unclaims). The mark keeps its original amount, and the screen shows the difference ("Your share is now $16.20. Sort out the $1.10 with Hana.") using `markDiffCents` from `lib/settle.ts`. *(Note 2026-11-25: replaced by ADR 0021. The screens now read `difference` and offer buttons to pay or pay back the gap; `markDiffCents` still exists with its old meaning but no screen reads it.)*
 - If Venmo changes its link format, only `lib/paylinks.ts` changes.
 - The payer-deletion trigger and `unmark_paid` take their locks in opposite orders, so a deletion racing an undo could deadlock (`docs/before-production.md` §6, review R9). To fix when account deletion is built.
 

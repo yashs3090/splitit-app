@@ -93,6 +93,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: space.md,
     borderWidth: 1,
     borderRadius: radius.sm,
+    borderCurve: 'continuous',
   },
   subtleBox: { minHeight: 36 },
   // A 2-pt ring on focus/error; padding shrinks by 1 so the text doesn't jump.

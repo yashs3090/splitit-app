@@ -17,6 +17,8 @@ import {
 import {
   actionError,
   addVenmoPrompt,
+  differenceArgs,
+  openedFor,
   billFooterAction,
   canChangePayer,
   payerAllPaidLine,
@@ -547,7 +549,7 @@ describe('actionError (brief §3.12)', () => {
   it.each([
     ['network', "Couldn't save. Try again.", false],
     ['payer_changed', BILL_ERROR_COPY.payer_changed, true],
-    ['not_complete', BILL_ERROR_COPY.not_complete, true],
+    ['not_complete', 'Something on the bill just changed. Check your share and try again.', true], // SE-UX-13
     ['not_allowed', BILL_ERROR_COPY.not_allowed, false],
     ['invalid_bill', "Couldn't save. Refresh and try again.", true],
     ['marks_changed', BILL_ERROR_COPY.marks_changed, true],
@@ -711,8 +713,10 @@ describe('settlePeople: Request (request spec R2, criteria 6–8)', () => {
   it('Q7: someone who owes nothing but has a mark → no request', () => {
     const plan = oneOwer(1510, { D: { cents: 200, at } }, true);
     const row = rowOf(view(plan, A, { venmoOf: () => 'dee-12345' }), D);
-    expect(row).toMatchObject({ amountCents: 0, status: { text: 'Paid' } });
+    // Task 6: a mark above a $0 share is a back difference; the payer gets pay-back controls, not a Request.
+    expect(row).toMatchObject({ amountCents: 0, status: { text: 'You owe $2.00 back' } });
     expect(row?.request).toBeNull();
+    expect(row?.payBack?.link).toMatchObject({ kind: 'link', cents: 200 });
   });
 
   it('Q8: a negative share → no request', () => {
@@ -994,7 +998,7 @@ describe('settleFooterAction (F1, criteria 24–28)', () => {
 
   it('F-e: marked → primary "Settle up" + "Marked paid"', () => {
     const data = billData({ participants: [member(A, 'Hana', 'hana-1'), member(B, 'Sam', TEJ, 1510), member(D, 'Dee')] });
-    expect(settleFooterAction(inputFor(data, B), 3)).toEqual({ ...F_F, caption: 'Marked paid' });
+    expect(settleFooterAction(inputFor(data, B), 3)).toEqual({ ...F_F, caption: 'Marked paid', tone: 'success', live: true });
   });
 
   describe('F-f: everything else is today\'s primary "Settle up"', () => {
@@ -1071,7 +1075,7 @@ describe('settleFooterAction (F1, criteria 24–28)', () => {
     expect(other?.kind === 'did_you_pay' && other.iPaid.action.cents).toBe(1400);
     // The viewer is now marked → the prompt is gone (F-e).
     const marked = billData({ participants: [member(A, 'Hana', 'hana-1'), member(B, 'Sam', TEJ, 1510), member(D, 'Dee')] });
-    expect(settleFooterAction(inputFor(marked, B, 'ios', opened), 3)).toEqual({ ...F_F, caption: 'Marked paid' });
+    expect(settleFooterAction(inputFor(marked, B, 'ios', opened), 3)).toEqual({ ...F_F, caption: 'Marked paid', tone: 'success', live: true });
   });
 });
 
@@ -1675,8 +1679,22 @@ describe('early rows (Task 6b)', () => {
 });
 
 describe('payer card with differences (criterion 31, F5)', () => {
-  it('someone unmarked: payer with the paid-of line only', () => {
-    expect(settleCard(view(rowsPlan(DIFF_MARKS), A)).lines).toEqual([{ text: '2 of 3 paid', tone: 'muted', live: true }]);
+  it('review R2: differences + someone unmarked → the paid-of line and the differences line (same as the footer)', () => {
+    const input = view(rowsPlan(DIFF_MARKS), A);
+    const m = settleCard(input);
+    expect(m).toMatchObject({ state: 'payer', label: '3 people owe you' });
+    expect(m.lines).toEqual([
+      { text: '2 of 3 paid', tone: 'muted', live: true },
+      { text: '2 differences to settle', tone: 'warning', live: true },
+    ]);
+    const one = settleCard(view(rowsPlan({ B: { cents: 1510, at } }), A));
+    expect(one.lines).toEqual([
+      { text: '1 of 3 paid', tone: 'muted', live: true },
+      { text: '1 difference to settle', tone: 'warning', live: true },
+    ]);
+  });
+  it('someone unmarked and no differences: the paid-of line only', () => {
+    expect(settleCard(view(rowsPlan({ B: { cents: 1620, at } }), A)).lines).toEqual([{ text: '1 of 3 paid', tone: 'muted', live: true }]);
   });
   it('every ower marked, 1 and 2 differences → payer with the warning differences line', () => {
     const one = settleCard(view(rowsPlan({ B: { cents: 1510, at }, E: { cents: 1400, at }, D: { cents: 500, at } }), A));
@@ -1749,6 +1767,7 @@ describe('footer (criterion 34)', () => {
       caption: 'Marked paid · 1 item left to claim',
       a11yHint: '1 item left to claim first',
       early: 'marked',
+      tone: 'success',
     });
   });
 
@@ -1773,6 +1792,7 @@ describe('footer (criterion 34)', () => {
       caption: 'Marked paid · 1 item and 1 discount left to claim',
       a11yHint: '1 item and 1 discount left to claim first',
       early: 'marked',
+      tone: 'success',
     });
     expect(billFooterAction(pay, 0, 0)).toEqual(F_F);
     expect(billFooterAction(marked, 0, 0)).toEqual(F_F);
@@ -1796,6 +1816,54 @@ describe('footer (criterion 34)', () => {
     expect(settleFooterAction(settleViewInputFor(one, A, 'ios', null), 3)).toEqual({ ...F_F, caption: '1 difference to settle', a11yHint: hint });
     const two = billData({ participants: [member(A, 'Hana', 'hana-1'), member(B, 'Sam', TEJ, 1400), member(D, 'Dee', null, 200)] });
     expect(settleFooterAction(settleViewInputFor(two, A, 'ios', null), 3)).toEqual({ ...F_F, caption: '2 differences to settle', a11yHint: hint });
+  });
+
+  it('review R3: only the mark confirmations carry the success tone; only the exact "Marked paid" is live', () => {
+    const tones = (a: ReturnType<typeof settleFooterAction>) => (a?.kind === 'settle' ? [a.caption, a.tone, a.live] : null);
+    const sam = (cents: number | null) => [member(A, 'Hana', 'hana-1'), member(B, 'Sam', TEJ, cents), member(D, 'Dee')];
+    // Ready and marked: tone + live. Early and marked: tone, not live (it would speak on every claim tap).
+    expect(tones(settleFooterAction(settleViewInputFor(billData({ participants: sam(1510) }), B, 'ios', null), 3))).toEqual(['Marked paid', 'success', true]);
+    expect(tones(settleFooterAction(settleViewInputFor(early(sam(1000)), B, 'ios', null), 3))).toEqual([
+      'Marked paid · 1 item left to claim',
+      'success',
+      undefined,
+    ]);
+    // Everything else: no tone, not live.
+    expect(tones(settleFooterAction(settleViewInputFor(early(), B, 'ios', null), 3))).toEqual(['You can pay now · 1 item left to claim', undefined, undefined]);
+    expect(tones(settleFooterAction(settleViewInputFor(early(), D, 'ios', null), 3))).toEqual(['1 item left to claim', undefined, undefined]);
+    expect(tones(settleFooterAction(settleViewInputFor(billData({ participants: sam(1400) }), B, 'ios', null), 3))).toEqual([
+      'You owe Hana $1.10 more',
+      undefined,
+      undefined,
+    ]);
+    expect(tones(settleFooterAction(settleViewInputFor(billData(), A, 'ios', null), 3))).toEqual([null, undefined, undefined]);
+    // billFooterAction's on-screen rebuilds keep the tone of an early "Marked paid" and add none elsewhere.
+    const marked = settleFooterAction(settleViewInputFor(early(sam(1000)), B, 'ios', null), 3);
+    expect(tones(billFooterAction(marked, 3, 0))).toEqual(['Marked paid · 3 items left to claim', 'success', undefined]);
+    expect(tones(billFooterAction(marked, 0, 0))).toEqual([null, undefined, undefined]);
+    const ready = settleFooterAction(settleViewInputFor(billData({ participants: sam(1510) }), B, 'ios', null), 3);
+    expect(tones(billFooterAction(ready, 1, 0))).toEqual(['1 item left to claim', undefined, undefined]);
+  });
+
+  it('review R5 (criterion 59): an early plan with an opened Pay keeps the footer\'s "Did you pay?" at the opened amount', () => {
+    const opened: OpenedVenmo = { payerId: A, cents: 1510 };
+    const input = settleViewInputFor(early(), B, 'ios', opened);
+    expect(input.plan.status).toBe('early');
+    expect(settleCard(input).state).toBe('owes_opened');
+    const got = settleFooterAction(input, 3);
+    expect(got).toEqual({
+      kind: 'did_you_pay',
+      text: 'Did you pay Hana?',
+      iPaid: { label: 'I paid', a11yLabel: 'I paid', a11yHint: 'Marks your share as paid', action: { kind: 'mark', payerId: A, cents: 1510 } },
+      notYet: { label: 'Not yet', a11yLabel: 'Not yet' },
+      details: { label: 'Details', a11yLabel: 'Settle up details', a11yHint: "Shows who's paid and other ways to pay" },
+    });
+    // The screen's own counts don't replace it: the amount is the opened one, not a current share.
+    expect(billFooterAction(got, 1, 0)).toBe(got);
+    expect(billFooterAction(got, 0, 0)).toBe(got);
+    // Dropped where contract O drops it: Sam can't settle early (no item claim) → today's footer.
+    const noClaim = billData({ rows: earlyRows, total: 4400, claims: [cl('burger', A), cl('fries', A)] });
+    expect(settleFooterAction(settleViewInputFor(noClaim, B, 'ios', opened), 3)?.kind).toBe('settle');
   });
 });
 
@@ -1871,6 +1939,11 @@ function cardFixtures(): SettleViewInput[] {
     bOwesReady(1400, m(1510)),
     bOwesReady(1511, m(1510)),
     neg,
+    settlePlan(
+      { totalCents: 800, items: [{ id: 'a', totalCents: 1000 }, { id: 'b', totalCents: 0 }], claims: [c('a', A), c('b', B)], participantIds: [A, B], extrasMode: 'equal' },
+      A,
+      {},
+    ),
     zero({}),
     zero(m(1510)),
     rowsPlan({}),
@@ -1909,7 +1982,8 @@ describe('glyph walk (criterion 66, VP-30, R8)', () => {
 describe('markers agree with cards (criterion 67)', () => {
   // Steps 1–2 of billMarker never fire for these facts, so only the settle marker is compared.
   const summary = { hostId: A, payerId: A, added: false, seen: true, claimedAny: true, complete: true };
-  const expected = (m: SettleCardModel): string | null => {
+  // Home shows one pill: "N left to pay" (H5) wins over differences (H6), even though the card shows both lines (review R2).
+  const expected = (m: SettleCardModel, plan: SettleViewInput['plan']): string | null => {
     switch (m.state) {
       case 'owes':
       case 'owes_no_venmo':
@@ -1921,6 +1995,7 @@ describe('markers agree with cards (criterion 67)', () => {
       case 'back_due':
         return 'paid_back_due';
       case 'payer':
+        if (plan.status === 'ready' && plan.paidCount < plan.owingCount) return 'left_to_pay';
         return m.lines.some((l) => /difference/.test(l.text)) ? 'differences' : 'left_to_pay';
       case 'payer_differences':
         return 'differences';
@@ -1935,7 +2010,7 @@ describe('markers agree with cards (criterion 67)', () => {
     for (const input of cardFixtures()) {
       const cardModel = settleCard({ ...input, openedVenmo: null });
       seen.add(cardModel.state);
-      expect([cardModel.state, billMarker(summary, input.viewerId, input.plan)]).toEqual([cardModel.state, expected(cardModel)]);
+      expect([cardModel.state, billMarker(summary, input.viewerId, input.plan)]).toEqual([cardModel.state, expected(cardModel, input.plan)]);
     }
     // The fixtures reach every state the criterion names.
     for (const s of ['owes', 'owes_no_venmo', 'marked', 'more_due', 'back_due', 'payer', 'payer_differences', 'payer_all_paid', 'payer_early', 'early_not_ready', 'nothing', 'negative', 'blocked']) {
@@ -1953,5 +2028,23 @@ describe('copy at a count of 1 and with "You" (criterion 32)', () => {
         if (r.name === 'You') expect(r.status?.text).not.toMatch(/^Owes/);
       }
     }
+  });
+});
+
+// Task 8: pass-through helpers, so screens never read money fields off actions (criterion 46).
+describe('openedFor / differenceArgs', () => {
+  it('Pay gives a share prompt; Pay more gives a "more" prompt with its starting mark', () => {
+    expect(openedFor({ kind: 'pay', url: 'u', payerId: 'a', cents: 1510 })).toEqual({ payerId: 'a', cents: 1510 });
+    expect(openedFor({ kind: 'pay_difference', url: 'u', payerId: 'a', cents: 110, fromCents: 1510, toCents: 1620 })).toEqual({
+      kind: 'more',
+      payerId: 'a',
+      cents: 110,
+      fromCents: 1510,
+    });
+  });
+
+  it('differenceArgs is the action as built: person, payer, from, to (a pay-back to 0 included)', () => {
+    expect(differenceArgs({ kind: 'mark_difference', userId: 'b', payerId: 'a', fromCents: 1510, toCents: 1620 })).toEqual(['b', 'a', 1510, 1620]);
+    expect(differenceArgs({ kind: 'mark_difference', userId: 'b', payerId: 'a', fromCents: 1510, toCents: 0 })).toEqual(['b', 'a', 1510, 0]);
   });
 });

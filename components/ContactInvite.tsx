@@ -214,7 +214,8 @@ function NumberChoice({
       {...focusProps}
       style={({ pressed }) => [
         styles.choice,
-        { backgroundColor: colors.surface, borderColor: colors.border },
+        // Tonal, no outline: outlines are for inputs only.
+        { backgroundColor: colors.surfaceMuted },
         pressed && styles.pressed,
         ringStyle,
       ]}
@@ -239,7 +240,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: space.md,
     paddingVertical: space.sm,
     borderRadius: radius.sm,
-    borderWidth: 1,
+    borderCurve: 'continuous',
   },
   grow: { flex: 1, minWidth: 0 },
   pressed: { opacity: opacity.pressed },

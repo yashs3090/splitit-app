@@ -183,12 +183,12 @@ describe('SegmentedControl', () => {
     expect(onChange).toHaveBeenCalledWith('total');
   });
 
-  it.each(['light', 'dark'] as const)('selected is tinted, bold and primary; unselected is plain (%s)', (scheme) => {
+  it.each(['light', 'dark'] as const)('selected is solid teal and bold; unselected is plain (%s)', (scheme) => {
     mockScheme.mockReturnValue(scheme);
     render(<SegmentedControl options={[{ value: 'percent', label: '%' }, { value: 'dollars', label: '$' }]} value="dollars" onChange={() => {}} />);
-    expect(flat(screen.getByText('$').props.style)).toMatchObject({ color: colors[scheme].primary, fontWeight: '700' });
+    expect(flat(screen.getByText('$').props.style)).toMatchObject({ color: colors[scheme].onPrimary, fontWeight: '700' });
     expect(flat(screen.getByText('%').props.style)).toMatchObject({ color: colors[scheme].text, fontWeight: '600' });
-    expect(flat(screen.getByRole('button', { name: '$' }).props.style).backgroundColor).toBe(colors[scheme].primarySurface);
+    expect(flat(screen.getByRole('button', { name: '$' }).props.style).backgroundColor).toBe(colors[scheme].primary);
     expect(flat(screen.getByRole('button', { name: '%' }).props.style).backgroundColor).toBeUndefined();
   });
 

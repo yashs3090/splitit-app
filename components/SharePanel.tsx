@@ -4,12 +4,16 @@
 // "Add people" (host only, shown when `onAddPeople` is set): docs/specs/2026-11-24-people-and-invites.md (D6, Task 7).
 // Any participant can share; only the host can replace the link, after an inline confirmation
 // (React Native Web has no Alert dialog, so the confirmation is part of the panel on every platform).
+// "Show QR code" (every participant) folds out a QR of the same link under the buttons
+// (components/InviteQr.tsx; docs/decisions-to-review.md "Invite QR").
 import * as Clipboard from 'expo-clipboard';
 import Plus from 'lucide-react-native/icons/plus';
+import QrCode from 'lucide-react-native/icons/qr-code';
 import { useState } from 'react';
 import { Platform, Share, StyleSheet, Text, View } from 'react-native';
 
 import { ContactInvite } from '@/components/ContactInvite';
+import { INVITE_QR_COPY, InviteQr } from '@/components/InviteQr';
 import { Banner, BannerText } from '@/components/ui/Banner';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -47,6 +51,8 @@ export function SharePanel({ url, isHost, onRotate, onAddPeople }: Props) {
   const [confirming, setConfirming] = useState(false);
   const [rotating, setRotating] = useState(false);
   const [rotateFailed, setRotateFailed] = useState(false);
+  // Folded by default (opt-in, like the other quiet extras); stays open across a new link, which redraws it.
+  const [showQr, setShowQr] = useState(false);
   // A copied-link note belongs to the link it was about.
   const [copiedUrl, setCopiedUrl] = useState(url);
   const copyState = copiedUrl === url ? copy : 'idle';
@@ -122,6 +128,15 @@ export function SharePanel({ url, isHost, onRotate, onAddPeople }: Props) {
       {copyState !== 'idle' ? (
         <StatusLine text={copyState === 'copied' ? COPIED : COPY_FAILED} tone={copyState === 'copied' ? 'success' : 'error'} />
       ) : null}
+
+      <TextLink
+        label={showQr ? INVITE_QR_COPY.hide : INVITE_QR_COPY.show}
+        accessibilityHint={showQr ? undefined : INVITE_QR_COPY.showHint}
+        accessibilityState={{ expanded: showQr }}
+        icon={QrCode}
+        onPress={() => setShowQr((v) => !v)}
+      />
+      {showQr ? <InviteQr url={url} /> : null}
 
       {isHost && !confirming ? (
         <TextLink

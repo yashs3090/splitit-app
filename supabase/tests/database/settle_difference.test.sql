@@ -159,6 +159,14 @@ begin
 end $$;
 reset role;
 
+-- Backdate Sam's fixture marks before saving the baseline. The fixtures set settled_at = now(),
+-- and now() is fixed for the whole test transaction, so without this a regression that rewrote
+-- settled_at = now() would still compare equal and the "settled_at unchanged" checks could not fail.
+update public.bill_participants as bp
+   set settled_at = timestamptz '2026-01-01 12:00:00+00'
+ where bp.user_id = pg_temp.sam()
+   and bp.bill_id in (select pg_temp.bid(t) from unnest(array['x', 'd2', 'd5', 'd6', 'd15']) as t);
+
 select set_config('test.' || t || '_at', (select bp.settled_at::text from public.bill_participants as bp
   where bp.bill_id = pg_temp.bid(t) and bp.user_id = pg_temp.sam()), true)
 from unnest(array['x', 'd2', 'd5', 'd6', 'd15']) as t;

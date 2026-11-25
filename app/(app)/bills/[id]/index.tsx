@@ -68,6 +68,7 @@ import { openPaymentLink } from '@/lib/paylinks';
 import {
   actionError,
   billFooterAction,
+  openedFor,
   openedStillMatches,
   payOpenFailedLine,
   saveRefreshFailed,
@@ -212,7 +213,7 @@ function BillScreen({ id, myId }: { id: string; myId: string }) {
     lastPayAt.current = now;
     const opening = openPaymentLink(action.url); // first call once the tap goes through; no await before it (web popup rule)
     const handle = settleInput?.payerVenmo ?? '';
-    setOpenedVenmo({ payerId: action.payerId, cents: action.cents });
+    setOpenedVenmo(openedFor(action));
     setFooterError(null);
     setPayFailure(null);
     void opening.then((res) => {
