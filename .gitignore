@@ -1,0 +1,66 @@
+# Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
+
+# dependencies
+node_modules/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store
+*.pem
+
+# local env files
+.env*.local
+
+# typescript
+*.tsbuildinfo
+
+example
+
+# generated native folders
+/ios
+/android
+
+# SplitIt: env files hold the local Supabase URL/key (never commit)
+.env
+.env.local
+
+# Supabase CLI local state (supabase/.env is covered by the .env rule above)
+supabase/.temp/
+supabase/.branches/
+
+# Receipt eval data can contain personal info
+eval/receipts/
+
+# Self-hosted Tesseract.js assets, copied from node_modules by scripts/copy-tesseract-assets.mjs
+/public/tesseract/
+
+# Real receipt photos used for testing (personal data, never commit)
+/receipts/
+
+# Self-hosted OpenCV.js + the built cv worker, from scripts/copy-opencv-assets.mjs and build-cv-worker.mjs
+/public/opencv/
+
+# Vercel (created by `vercel link`; local only)
+.vercel/

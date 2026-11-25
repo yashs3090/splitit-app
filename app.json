@@ -1,0 +1,71 @@
+{
+  "expo": {
+    "name": "SplitIt",
+    "slug": "splitit",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "splitit",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "icon": "./assets/expo.icon",
+      "bundleIdentifier": "com.yashs3090.splitit"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0F766E",
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "backgroundImage": "./assets/images/android-icon-background.png",
+        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "package": "com.yashs3090.splitit",
+      "blockedPermissions": [
+        "android.permission.WRITE_CONTACTS"
+      ]
+    },
+    "web": {
+      "output": "single",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#0F766E",
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 76,
+          "dark": {
+            "backgroundColor": "#0B0F14",
+            "image": "./assets/images/splash-icon.png"
+          }
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "SplitIt uses the camera to take a photo of your receipt. The photo is read on your phone and isn't uploaded.",
+          "microphonePermission": false,
+          "photosPermission": false
+        }
+      ],
+      [
+        "expo-mlkit-ocr",
+        {
+          "iosEngine": "vision"
+        }
+      ],
+      [
+        "expo-contacts",
+        {
+          "contactsPermission": "SplitIt opens your contacts only when you pick someone to text a bill link to. Your contacts stay on your phone."
+        }
+      ]
+    ],
+    "experiments": {
+      "reactCompiler": true
+    }
+  }
+}

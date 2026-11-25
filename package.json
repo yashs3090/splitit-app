@@ -1,0 +1,86 @@
+{
+  "name": "splitit-app",
+  "main": "expo-router/entry",
+  "version": "1.0.0",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.109.0",
+    "@techstark/opencv-js": "4.12.0-release.1",
+    "expo": "~57.0.33",
+    "expo-clipboard": "~57.0.2",
+    "expo-constants": "~57.0.24",
+    "expo-contacts": "~57.0.9",
+    "expo-file-system": "~57.0.7",
+    "expo-font": "~57.0.4",
+    "expo-image-manipulator": "~57.0.22",
+    "expo-image-picker": "~57.0.21",
+    "expo-linking": "~57.0.14",
+    "expo-mlkit-ocr": "0.2.7",
+    "expo-router": "~57.0.31",
+    "expo-secure-store": "~57.0.4",
+    "expo-sms": "~57.0.2",
+    "expo-splash-screen": "~57.0.11",
+    "expo-status-bar": "~57.0.1",
+    "expo-system-ui": "~57.0.4",
+    "expo-web-browser": "~57.0.3",
+    "lucide-react-native": "1.80.0",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-native": "0.86.3",
+    "react-native-gesture-handler": "~2.32.0",
+    "react-native-reanimated": "4.5.1",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-screens": "~4.26.0",
+    "react-native-svg": "15.15.4",
+    "react-native-web": "~0.21.0",
+    "react-native-worklets": "0.10.1",
+    "tesseract.js": "7.0.0"
+  },
+  "devDependencies": {
+    "@react-native/jest-preset": "^0.86.3",
+    "@tesseract.js-data/eng": "1.0.0",
+    "@testing-library/react-native": "^13.3.3",
+    "@types/jest": "^29.5.14",
+    "@types/react": "~19.2.2",
+    "esbuild": "0.28.2",
+    "jest": "^29.7.0",
+    "jest-expo": "~57.0.6",
+    "playwright": "1.65.1",
+    "react-test-renderer": "19.2.3",
+    "supabase": "^3.2.0",
+    "tsx": "4.23.15",
+    "typescript": "~6.0.3"
+  },
+  "scripts": {
+    "prestart": "node scripts/copy-tesseract-assets.mjs && node scripts/copy-opencv-assets.mjs && node scripts/build-cv-worker.mjs",
+    "start": "expo start",
+    "preweb": "node scripts/copy-tesseract-assets.mjs && node scripts/copy-opencv-assets.mjs && node scripts/build-cv-worker.mjs",
+    "web": "expo start --web",
+    "preexport:web": "node scripts/copy-tesseract-assets.mjs && node scripts/copy-opencv-assets.mjs && node scripts/build-cv-worker.mjs",
+    "export:web": "expo export -p web --clear",
+    "test": "jest",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p scripts && tsc --noEmit -p scripts/ocr-harness",
+    "db:start": "supabase start",
+    "db:stop": "supabase stop",
+    "db:reset": "supabase db reset",
+    "db:status": "supabase status",
+    "db:test": "supabase test db",
+    "eval": "tsx scripts/eval-receipts.ts",
+    "answers:draft": "tsx scripts/answers-cli.ts draft",
+    "answers:check": "tsx scripts/answers-cli.ts check",
+    "preocr:harness": "node scripts/copy-tesseract-assets.mjs",
+    "ocr:harness": "tsx scripts/ocr-harness/run.ts"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=20.19.4"
+  },
+  "jest": {
+    "preset": "jest-expo",
+    "setupFilesAfterEnv": [
+      "<rootDir>/test-utils/jestSetup.ts"
+    ],
+    "moduleNameMapper": {
+      "^lucide-react-native/icons/(.*)$": "<rootDir>/node_modules/lucide-react-native/dist/cjs/icons/$1.js"
+    }
+  }
+}

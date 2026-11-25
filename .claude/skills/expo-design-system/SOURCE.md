@@ -1,0 +1,2 @@
+Source: https://github.com/expo/skills (plugins/expo/skills/expo-design-system), commit c5e536273b6b4a7a3ad5dd9d74b6098c15138b21, copied 2026-11-25. MIT license (LICENSE).
+SplitIt note: our token system is lib/theme.ts with components/ui/; per this skill's "Adopt Before You Build", it is the source of truth. Our .claude/skills/ui-ux-designer rules take precedence where they differ. Do not run the Submitting Feedback command without the user's OK.

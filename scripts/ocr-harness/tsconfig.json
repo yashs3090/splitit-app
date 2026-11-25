@@ -1,0 +1,9 @@
+{
+  "//": "Browser side of the OCR harness (page bundle): DOM types only, no Node types, so web code typechecks as it runs in the browser.",
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "types": []
+  },
+  "include": ["./page.ts", "./prepare-current.ts", "./protocol.ts", "./shims/*.ts"],
+  "exclude": []
+}
