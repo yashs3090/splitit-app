@@ -12,6 +12,7 @@
 - 2026-11-24 "Native modules that throw under Jest got one global stand-in, which had to fail loudly" [testing]: PI-C-7, review R5.
 - 2026-11-21, 2026-11-22, 2026-11-24 (twice) and 2026-11-24 "Root `.env` Google variables, fifth report" [expo]
 - 2026-11-24 "QA's own dev server worked; shell values override the root `.env`" [testing]
+- 2026-11-24 "Root `.env` Google variables, sixth report" and 2026-11-25 "Root `.env` Google variables, seventh report" [expo] (added in later retros): still reported in full each time; Change 5 would make it one line.
 
 ## Change 1: `CLAUDE.md` § Commands, Tests bullet
 

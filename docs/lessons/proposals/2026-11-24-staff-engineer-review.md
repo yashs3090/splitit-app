@@ -4,7 +4,7 @@
 
 **Targets:** new `.claude/agents/staff-engineer.md`; `.claude/skills/build-task/SKILL.md` step 1
 
-**Promotion rule used:** a gap in the team becomes a proposal for a new agent. The user asked for this role in M3. It's the first occurrence, so treat this as optional: you may prefer to keep asking for it case by case. If you reject the new agent but want the step, keep Change 2 and replace "`staff-engineer`" with "a Plan agent told to follow the checklist in this proposal".
+**Promotion rule used:** a gap in the team becomes a proposal for a new agent. The user asked for this role in M3. **Updated 2026-11-25 (settle-early retro):** it has now paid off twice, so it's no longer marked optional. In settle early, the review found 7 must-fixes before any code. If you reject the new agent but want the step, keep Change 2 and replace "`staff-engineer`" with "a Plan agent told to follow the checklist in this proposal".
 
 **Notes before applying:** agent files load at session start. Start a new session or branch before spawning it by name (lessons 2026-11-21, 2026-11-22).
 
@@ -12,6 +12,7 @@
 - 2026-11-24 "A staff-engineer review before the screen tasks simplified the plan" [process]: a Plan agent dropped `AppState` return detection (false prompts on iOS, blind to blocked popups), made Pay call `openPaymentLink` synchronously so web popup blockers allow it, simplified `expected_cleared`, and merged three screen tasks that would have reworked the same files. One simplification (count-based `expected_cleared`) left a race the review found (R5), so the trade-off line is part of the agent's output below.
 - 2026-11-24 "The spec assumed a library's API…" and "A second deadlock: the lock argument missed the locks Postgres takes for you" [process, rls] (added in the people-and-invites retro): the contacts picker's real permission needs and field shape, and an FK-induced lock order, are both things a whole-plan read with `node_modules` and the migrations open could have caught before coding. Checklist items 1 and 4 below were extended for them.
 - 2026-11-22 "App and DB tasks built in parallel drifted from their shared contract" and 2026-11-21 "Parallel agents worked from a stale snapshot" [process]: cross-task problems that a whole-plan read before implementation is placed to catch.
+- 2026-11-25 "Plans, UX, visual and eng design before code: the staff-engineer review found 7 must-fixes" [process] (added in the settle-early retro): F1 `max_rows` truncation, F2 the $0-mark trap, F3 the prompt dropped on an amount change, F4/F5 spec contradictions, F6/F7 missing breakage and dependencies (docs/specs/2026-11-25-settle-early-and-differences-eng.md). Checklist items 6–8 and the "after UX and visual docs" wording in Change 2 come from it. Related entries: "PostgREST `max_rows` cuts results off…" [rls], "A $0 mark was a trap…" [money-math].
 
 ## Change 1: new file `.claude/agents/staff-engineer.md`
 
@@ -33,6 +34,9 @@ Read `CLAUDE.md`, the spec, the ADRs it cites, and the `docs/lessons/log.md` sec
 3. **Contracts:** anything both the app and the DB implement (arguments, stored fields, a rule). Is it defined once, and do both sides test the same boundary cases?
 4. **State and races:** destructive actions decided on stale screen data, expected-state parameters, lock order between functions and triggers (including the locks FK checks, cascades and event inserts take implicitly), async steps whose failure isn't designed (including "the write worked, the reload failed").
 5. **Simpler designs:** what can be cut for v1 without losing what the user asked for.
+6. **Server limits:** reads that can hit a server-side cap that truncates without an error (PostgREST `max_rows` in `supabase/config.toml`, column length limits). Each needs paging or an exact-count check that fails closed, never a hard-coded copy of the limit.
+7. **Degenerate values:** what every new rule (leave, remove, undo, notices, cards) does for a person whose share is $0 or negative, an empty bill, and a bill with one person.
+8. **The documents agree:** the spec, the UX brief and the visual design don't contradict each other or themselves (a state in one table and missing from another, two rows for the same case). The planned-breakage list and the task dependencies are complete.
 
 ## Output (returned to the main session, not written to a file)
 - Numbered recommendations. Each one has: the change, why (evidence with `file:line` or an installed-package citation), **what it gives up** (what the simpler version can't detect or do), and which tasks and criteria it affects.
@@ -50,7 +54,7 @@ Old:
 New:
 ```
 1. **Spec:** run the `product-manager` agent with the milestone or feature. It returns a spec path under `docs/specs/`. If the spec lists open questions that only the user can decide, ask the user before going on.
-   - **Design review:** for slices with screens on top of new DB functions or realtime, or more than about six tasks, run `staff-engineer` on the answered spec. Give its brief to the `product-manager`, which merges it (for screen-heavy slices, into a UX brief as well) as a dated amendment and writes each simplification's trade-off into the spec's Risks. Items the brief marks as the user's decision go to the user.
+   - **Design review:** for slices with screens on top of new DB functions or realtime, or more than about six tasks, run `staff-engineer` on the answered spec, last and before any code: if there's a UX brief or visual design, it reviews them together with the spec. Give its brief to the `product-manager`, which merges it (for screen-heavy slices, into a UX brief as well) as a dated amendment and writes each simplification's trade-off into the spec's Risks. Items the brief marks as the user's decision go to the user.
 ```
 
 (If the delegated-decisions proposal is also approved, both sub-bullets go under step 1, delegated decisions first.)

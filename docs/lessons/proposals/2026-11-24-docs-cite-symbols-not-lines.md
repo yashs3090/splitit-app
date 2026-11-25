@@ -49,8 +49,10 @@ Old:
 New:
 ```
    - **Docs that describe status run last:** a docs task that says what is or isn't built starts only after every task it describes has finished. Before the summary, check any "not built" / "pending" lines it wrote against the code.
-   - **Hand the docs task over whole:** give `docs-writer` the spec path and the docs task number, plus any extra items, rather than your own summary of the task. Before the summary, check its item-by-item report against the spec's docs criterion and do or re-assign anything skipped.
+   - **Hand the docs task over whole:** give `docs-writer` the spec path and the docs task number, plus any extra items, rather than your own summary of the task. Also give it the review findings and the QA report in full (paths or pasted text, not just ids like "R1, R6"), plus the decisions log entries it should cover. Before the summary, check its item-by-item report against the spec's docs criterion and do or re-assign anything skipped.
 ```
+
+**Extended 2026-11-25 (settle-early retro), third occurrence:** the docs-writer couldn't document review R1 and R6 because it was given the ids without their text. Evidence: log 2026-11-25 "The docs handoff lacked the source material, third time" [process]. The added sentence is "Also give it the review findings and the QA report in full…".
 
 ## Change 4 (added 2026-11-24, bill-markers retro): `.claude/agents/docs-writer.md`, § Report
 

@@ -56,7 +56,7 @@ What each person sees, with Sam marked at $15.10 and Hana the payer:
 | Sam's share now | Sam's card | Hana's row for Sam |
 |---|---|---|
 | $16.20 | `You owe Hana more` / `$1.10`, **Pay Hana $1.10 more on Venmo**, **I paid the difference** | `Owes $1.10 more` and a **Request $1.10** link |
-| $14.00 | `Hana owes you` / `$1.10`, an outlined **Request $1.10 from Hana on Venmo** (never writes anything) | `You owe $1.10 back`, **Pay $1.10 back** and **I paid it back** |
+| $14.00 | `Hana owes you` / `$1.10`, a secondary (tonal, not filled) **Request $1.10 from Hana on Venmo** button that never writes anything | `You owe $1.10 back`, **Pay $1.10 back** and **I paid it back** |
 | $15.11 | the normal "Marked paid" card (within the 1¢ tolerance) | `Paid` |
 
 **The stale-state token.** `p_expected_cents` is the mark the screen showed. If the stored mark is different now (a double tap, a second phone, a pay-back that landed while Sam was in Venmo), the function refuses with `22023 mark_changed` and the screen re-reads. See [stale-state checks](../concepts/stale-state-checks.md).

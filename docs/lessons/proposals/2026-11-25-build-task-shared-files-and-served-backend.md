@@ -40,5 +40,19 @@ New:
 ```
 (Only the start of the bullet is shown; the rest of it stays as it is.)
 
+## Change 3 (added 2026-11-25, settle-early retro): step 2, "Parallel tasks" sub-bullet, one more sentence after the sentence Change 2 adds about `supabase/config.toml`
+
+Evidence: log 2026-11-25 "Another session committed everything onto a new branch mid-task" [process]. During settle early, another session's agent committed all uncommitted work (this task's included) onto `feat/qr-invite-settle-visual-pass` at the user's request, so HEAD moved off `main` under the task. The file-ownership gate and swapping review fixes (six theirs, two ours) worked. Git state isn't covered by that gate.
+
+Old (the sentence Change 2 adds):
+```
+If another session changes `supabase/config.toml` or `supabase/.env`, Supabase needs a restart; ask the user.
+```
+
+New:
+```
+If another session changes `supabase/config.toml` or `supabase/.env`, Supabase needs a restart; ask the user. Git state is shared too: before you commit, switch branch or stash while another session is active, tell that session; and run `git branch --show-current` and `git status --short` at the start of the task and again before the summary, reporting any change you didn't make.
+```
+
 ## What this changes for you
 You won't be shown a demo that's quietly talking to the hosted project while the new work is only on your Mac. And when several agents work at once, two of them won't edit the same file at the same time, so the short "a test broke in someone else's file" detours in this slice don't come back.

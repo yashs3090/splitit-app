@@ -1725,6 +1725,29 @@ describe('payer card with differences (criterion 31, F5)', () => {
   });
 });
 
+describe('Everyone aside with open differences (QA F-1, SE-QA-1)', () => {
+  // Every ower marked (allPaid), but a mark no longer matches its share: the aside must not say
+  // "All paid". It uses the payer card's own differences wording instead.
+  it('everyone marked, 1 difference open → "1 difference to settle", never "All paid"', () => {
+    const plan = rowsPlan({ B: { cents: 1510, at }, E: { cents: 1400, at }, D: { cents: 500, at } });
+    expect(plan.status === 'ready' && plan.allPaid).toBe(true);
+    for (const viewer of [B, D, E]) expect(settlePeople(view(plan, viewer))?.aside).toBe('1 difference to settle');
+  });
+  it('everyone marked, 2 differences open → "2 differences to settle"', () => {
+    const plan = rowsPlan({ ...DIFF_MARKS, D: { cents: 500, at } });
+    for (const viewer of [B, D, E]) expect(settlePeople(view(plan, viewer))?.aside).toBe('2 differences to settle');
+  });
+  it('everyone marked, no open differences (within tolerance) → "All paid"', () => {
+    const plan = rowsPlan({ B: { cents: 1619, at }, E: { cents: 1401, at }, D: { cents: 500, at } });
+    expect(settlePeople(view(plan, D))?.aside).toBe('All paid');
+  });
+  it('someone unmarked keeps "N of M paid", with or without a difference; the payer still gets no aside', () => {
+    expect(settlePeople(view(rowsPlan({ B: { cents: 1510, at } }), D))?.aside).toBe('1 of 3 paid');
+    expect(settlePeople(view(rowsPlan({ B: { cents: 1620, at } }), D))?.aside).toBe('1 of 3 paid');
+    expect(settlePeople(view(rowsPlan({ ...DIFF_MARKS, D: { cents: 500, at } }), A))?.aside).toBeNull();
+  });
+});
+
 describe('actionError additions (criterion 33)', () => {
   it('mark_changed and not_complete refetch with settle copy', () => {
     expect(actionError('mark_changed')).toEqual({ text: 'Your "I paid" just changed. Check the amount and try again.', refetch: true });

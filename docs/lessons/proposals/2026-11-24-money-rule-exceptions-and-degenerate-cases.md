@@ -14,6 +14,8 @@
 - 2026-11-24 "A second deliberate app/DB difference: the DB accepts 'I paid' from someone who owes nothing" [money-math] (added in the people-and-invites retro): PI-M-1. The screen hides "I paid" for a $0 share, but `mark_paid` accepts it, for the same reason as K6 (matching would need `computeShares` in SQL). Two cases of the same shape now, so Change 1 has more support.
 - 2026-11-24 "Degenerate split cases again: negative shares are now reachable, and all-zero weights leave extras unclaimed" [money-math] (added in the claimable-discounts retro): claiming a discount makes a negative share reachable in normal use (CD-6, still "needs your look"). QA reached the all-zero-weights case again: the extras stay under Unclaimed while the bill counts as complete. Both are inputs that Change 2 already lists. This is the third time such a case came up mid-build rather than in the spec, so Change 2 has more support. No wording change.
 
+- 2026-11-25 "A $0 mark was a trap: no Undo, and it blocked leaving" [money-math] (added in the settle-early retro): F2. A $0 mark had no Undo, and rule L3 then stopped that person from leaving or being removed. This is the fourth degenerate case found after the spec was written. Change 2 gains one sentence (marks, leaving, undo and notices for a $0 or negative share).
+
 ## Change 1: `CLAUDE.md` § Conventions
 
 Old:
@@ -35,7 +37,7 @@ Old:
 
 New:
 ```
-- Money math, privacy and RLS always get explicit acceptance criteria. Client calls written into criteria name their columns (`.select('venmo_username')`, never a bare `.select()` or `select('*')`): on tables with column-level grants, `*` fails with `42501` for everyone. A spec that builds on `computeShares` lists the degenerate split inputs among its boundary cases: every weight 0 in proportional mode, no rows with a total above 0, a negative share in even mode, one participant, and a three-way remainder tie. It also asks for a seeded property test over random bills in both modes. If the property test finds a case that changes what someone sees or owes, it goes to the user (as Q10 did in M3).
+- Money math, privacy and RLS always get explicit acceptance criteria. Client calls written into criteria name their columns (`.select('venmo_username')`, never a bare `.select()` or `select('*')`): on tables with column-level grants, `*` fails with `42501` for everyone. A spec that builds on `computeShares` lists the degenerate split inputs among its boundary cases: every weight 0 in proportional mode, no rows with a total above 0, a negative share in even mode, one participant, and a three-way remainder tie. Any new rule about marks, leaving, removal, undo or notices says what it does for a person whose share is $0 and one whose share is negative. It also asks for a seeded property test over random bills in both modes. If the property test finds a case that changes what someone sees or owes, it goes to the user (as Q10 did in M3).
 ```
 
 ## Before applying

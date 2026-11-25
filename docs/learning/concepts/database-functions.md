@@ -197,13 +197,15 @@ These three run the Settle screen ([ADR 0015](../decisions/0015-settling-one-pay
 5. The bill is complete (`private.bill_is_complete`): else `22023 not_complete`.
 6. Set your mark, but only `where settled_at is null`. If you were already marked, that update touches 0 rows, so nothing changes and no event is logged. That makes a double tap harmless (it's **idempotent**: twice is the same as once).
 
+*Note 2026-11-25: `mark_paid` was re-created with a new check order (participation read before any lock, then `all_zero` and early settling). See "Settling early and paying differences" below.*
+
 **`unmark_paid(p_bill_id, p_user_id)`**: the host, the person themself, or the payer. Anyone else gets `42501` **before** the function looks at the target, so a disallowed caller learns nothing about whether that person is marked. An unmarked target is a no-op with no event.
 
 `p_expected_cleared` and `p_payer_id` are **stale-state tokens**: the screen sends what it showed, and the function refuses if that's no longer true. That pattern has its own note: [stale-state checks](stale-state-checks.md).
 
 **`private.bill_is_complete(p_bill_id)`** answers "does every `line_items` row of this bill have at least one claim?". It's the database copy of the app's `sharesComplete` (`lib/split.ts:210`), and both sides test the same cases (K1 to K6 in the spec).
 - It's `security invoker` and lives in `private`, with execute revoked from every client role. Only `mark_paid` calls it, and `mark_paid` runs as the owner, so no grant is needed.
-- One known difference from the app, kept on purpose: a proportional bill whose items are all $0.00 but whose total isn't. The app blocks settling (`blocked_all_zero`); this helper says "complete". See ADR 0015, "K6".
+- One known difference from the app, kept on purpose: a proportional bill whose items are all $0.00 but whose total isn't. The app blocks settling (`blocked_all_zero`); this helper says "complete". See ADR 0015, "K6". *(Note 2026-11-25: the helper is unchanged and still says "complete", but `mark_paid` no longer asks it alone. It asks `private.settle_state`, which refuses this bill with `all_zero`, so K6 is closed. `my_bills` still uses `bill_is_complete` for its `complete` column.)*
 
 #### Locking order: `for update` vs `for share`
 `select … for update` and `select … for share` lock the rows they read until the transaction ends. The two locks differ in **who else can get in** (Postgres docs, "Row-Level Locks"):
@@ -227,6 +229,57 @@ We have one known exception. When the payer's account is deleted, the `DELETE` l
 > *Note 2026-11-24:* the People review (R1) found that claims didn't follow "bill first" either, because of locks Postgres takes on its own. That is fixed, and a second, smaller exception is left open. See "One lock order for every bill" below.
 
 Tests: `supabase/tests/database/settle_payer.test.sql` (criteria 1–13: columns, invariant, account deletion, grants, `set_payer`), `supabase/tests/database/settle_marks.test.sql` (criteria 14–23: completeness K1–K6, `mark_paid`, `unmark_paid`, error order, grants).
+
+### Settling early and paying differences (2026-11-25)
+These changes let people pay before every item is claimed (on proportional bills) and settle a difference when a share moves after "I paid" ([ADR 0021](../decisions/0021-settling-early-and-paying-differences.md), spec `docs/specs/2026-11-25-settle-early-and-differences.md`). Two migrations: `supabase/migrations/20261125090050_settle_early.sql` and `20261125090051_settle_difference.sql`.
+
+#### `private.settle_state(bill, user)`: rule E in one SQL statement
+It answers "may this person mark paid?" with one of four words: `all_zero`, `final`, `early`, `not_complete` (the rule is in ADR 0021 §1). `mark_paid` and `settle_difference` call it once each. `private.bill_all_zero(bill)` is just `settle_state(bill, null) = 'all_zero'`, so rule Z is written once (decision SE-DB-2).
+
+**Why one statement, not several `select`s in plpgsql.** Our functions run at Postgres's default isolation level, **Read Committed**. The Postgres docs say that at this level "a `SELECT` query … sees a snapshot of the database as of the instant the query begins to run", and that "two successive `SELECT` commands can see different data, even though they are within a single transaction, if other transactions commit changes after the first `SELECT` starts and before the second `SELECT` starts". So if rule E were three separate reads (the sums, "is every row claimed?", "does Sam have an item claim?"), Dee's claim could commit between two of them, and the answer could match a bill that never existed: sums from before her claim, completeness from after. Written as one `language sql` statement (a chain of `with` parts, called CTEs), every part reads **the same snapshot**. Criterion 14 checks the function's language is `sql`.
+
+**Why `bigint`.** A bill can have up to 500 rows of up to 9,999,999¢. Their sum can pass 2,147,483,647, the largest `integer` (int4). `sum()` of an integer column returns `bigint`, and the function never casts it back. The test inserts 220 rows of 9,999,999¢ and checks the function still answers (decision SE-DB-6).
+
+**Security invoker, not definer** (decision SE-DB-1). No client may execute it, and its only callers are definer functions that already run as the owner. Definer would add privilege it doesn't need. Same as `bill_is_complete`.
+
+*Note:* `settle_state` checks "every row has a claim" inline rather than calling `bill_is_complete`, so the whole answer comes from one snapshot. That's the same C1 rule written a second time in SQL. If C1 ever changes, change both.
+
+#### `mark_paid`, re-created
+Same name, arguments and grants. New check order (the app's error messages rely on it):
+1. Signed out, or not a participant (a plain read, **no lock**, so a stranger can't make the bill's users wait, the `leave_bill` R4 rule): `42501`.
+2. Lock the bill row `for share` and check participation again.
+3. `p_cents` outside 1–99,999,999: `22023 invalid_amount`.
+4. `p_payer_id` isn't the payer: `22023 payer_changed`.
+5. You are the payer: `22023 is_payer`.
+6. `settle_state` says `all_zero`: `22023 all_zero` (new; this closes K6).
+7. `settle_state` isn't `final` or `early`: `22023 not_complete`.
+8. Already marked: nothing happens (differences go through `settle_difference`).
+9. Set the mark and log `marked_paid`.
+
+#### `settle_difference(bill, person, payer, p_expected_cents, p_new_cents)`
+Changes one person's mark from `p_expected_cents` (what the screen showed) to `p_new_cents`. Security definer, `search_path = ''`, executable by `authenticated` only. In order:
+1. Signed out, not a participant (plain read, no lock), then `for share` on the bill and check again: `42501`.
+2. Amounts: "from" outside 1–99,999,999, "to" outside 0–99,999,999, or the two equal: `22023 invalid_amount`.
+3. Stale payer: `22023 payer_changed`.
+4. **Who may call, by direction:** raising (to > from) only the person themself; lowering only the current payer; nobody else, the host included; and never on the payer's own row: `42501 not_allowed`.
+5. `settle_state` is `all_zero`, or isn't `final`: `22023 all_zero` / `not_complete`. Differences wait until the bill is complete.
+6. Lock the person's participant row **`for no key update`** (below).
+7. **Already in the requested state?** Return success with no write, no event and no broadcast (the idempotent retry).
+8. Not marked, or the mark isn't `p_expected_cents`: `22023 mark_changed` (the stale-state token).
+9. Write: the new amount, or, when "to" is 0, clear the mark (`settled_at` and `settled_cents` both null). Log one `paid_difference` or `paid_back` event.
+
+Steps 7 and 8, and what the token can and can't catch, are explained in [stale-state checks](stale-state-checks.md), "The difference token".
+
+#### `for no key update` instead of `for update`
+Both lock a row against other writers. The difference is who they let in. The Postgres docs: `for no key update` "behaves similarly to `FOR UPDATE`, except that the lock acquired is weaker: this lock will not block `SELECT FOR KEY SHARE` commands", and it's "also acquired by any `UPDATE` that does not acquire a `FOR UPDATE` lock". (A plain `UPDATE` takes `for update` only if it changes a column with a unique index that a foreign key can use.)
+
+Why that matters here: every claim Sam makes takes `for key share` on **his participant row** (the claim's foreign key points at it; see "Locks you don't write" below). If `settle_difference` took `for update` on that row, it would have to wait behind Sam's own claim taps, and they behind it. `for no key update` doesn't conflict with `for key share`, so claims and differences don't queue behind each other. It still conflicts with itself, so `settle_difference`, `mark_paid` and `unmark_paid` on the same person still take turns.
+
+`mark_paid` gets the same lock without asking for it: its `UPDATE` changes only `settled_at` and `settled_cents`, which aren't key columns, so Postgres takes `for no key update` automatically. (Decision SE-ENG-4. The spec first said `for update`; the engineering review caught it.)
+
+**The full lock order** (both functions, from their migration headers): no lock for the participation read → `for share` on the bill → no locks while `settle_state` reads rows and claims → `for no key update` on the person's participant row → the Activity insert's foreign keys take `for key share` on the bill (already held) and on the caller's `profiles` row → one broadcast. Bill first, then participant row: the same direction as every other path, so no new deadlock.
+
+Tests: `supabase/tests/database/settle_early.test.sql` (E1–E20, check order, grants, the lock order checked statically), `settle_difference.test.sql` (D1–D20, broadcasts, grants, lock order, the bigint case), and the K6 block of `settle_marks.test.sql`.
 
 ### People you've split with: add, remove, leave (2026-11-24)
 These run the "People you've split with" list and the Add people screen ([ADR 0016](../decisions/0016-people-come-from-shared-bills.md)). Clients still have no INSERT or DELETE on `bill_participants`, so these functions (plus `create_bill` and `join_bill`) are the only way onto or off a bill.
@@ -369,7 +422,7 @@ Tests: `supabase/tests/database/bill_markers.test.sql` (criteria 1–16). Criter
 
 **Error contract.** Functions raise a fixed SQLSTATE plus a fixed message (`'not_allowed'`, `'invalid_bill'`, `'claimers_changed'`…). `lib/bills.ts:119-130` maps only those to app codes. Server text never reaches the screen.
 
-Tests (pgTAP): `supabase/tests/database/bill_functions.test.sql`, `bill_edit_realtime.test.sql`, `item_split.test.sql`, `extras_split.test.sql`, `m2_review_fixes.test.sql`, `profile_venmo.test.sql`, `settle_payer.test.sql`, `settle_marks.test.sql`, `people.test.sql`, `membership.test.sql`, `people_review_fixes.test.sql`, `bill_markers.test.sql`. They check `prosecdef` (definer or not), `proconfig = {search_path=""}`, `anon` being refused, and each guard.
+Tests (pgTAP): `supabase/tests/database/bill_functions.test.sql`, `bill_edit_realtime.test.sql`, `item_split.test.sql`, `extras_split.test.sql`, `m2_review_fixes.test.sql`, `profile_venmo.test.sql`, `settle_payer.test.sql`, `settle_marks.test.sql`, `people.test.sql`, `membership.test.sql`, `people_review_fixes.test.sql`, `bill_markers.test.sql`, `settle_early.test.sql`, `settle_difference.test.sql`. They check `prosecdef` (definer or not), `proconfig = {search_path=""}`, `anon` being refused, and each guard.
 
 ## Pitfalls
 - **Making a function definer "to be safe".** It's the opposite: definer *removes* RLS, so every check becomes your job. Default to invoker.
@@ -387,6 +440,10 @@ Tests (pgTAP): `supabase/tests/database/bill_functions.test.sql`, `bill_edit_rea
 - **Writing a rule twice.** L1 and L3 each live in one helper (`my_links`, `is_removable`) that every function calls. Two copies drift apart, and then the list says "you can add Sam" while the add says `not_linked`.
 - **Using `for update` when `for share` is enough.** An exclusive lock makes unrelated callers queue up (two people marking "I paid" at once). Use `for share` when you only need the row to stay the same, and `for update` when you're about to change something that depends on what you read.
 - **Running per-row subqueries before the limit.** If an expensive column (an `exists`, a helper like `bill_is_complete`) also appears in `order by`, Postgres must compute it for every row before it can sort. Sort and limit on plain columns, as `my_bills` does, and the expensive ones run only for the rows you return.
+- **Answering one question with several `select`s in plpgsql.** Under Read Committed each statement gets a new snapshot, so the parts can come from different moments. If the answer must describe one real state, write it as one SQL statement (`settle_state`).
+- **Summing money columns into `integer`.** Hundreds of rows can pass int4's limit. Keep sums as `bigint` and never cast them back.
+- **Taking `for update` on a row that other writes point at.** Every foreign-key insert takes `for key share` on the row it points to, and `for update` blocks that. If you're only changing non-key columns, `for no key update` is enough and doesn't make those inserts wait.
+- **An "already done" shortcut placed before the permission checks.** It would let anyone get a success answer for a call they aren't allowed to make. `settle_difference` runs its idempotent check only after every "who are you, may you" check.
 - **Editing an applied migration to change a function.** Write a new migration with `create or replace` (as `20261121080352_bill_events.sql` does). If the argument list changes, `drop` and re-create, then re-grant.
 
 ## Check yourself
@@ -410,11 +467,17 @@ Tests (pgTAP): `supabase/tests/database/bill_functions.test.sql`, `bill_edit_rea
 18. List every row lock `mark_bill_seen` takes, in order, including the two Postgres takes by itself. Why does the bills row have to come first?
 19. Sam has been on 300 bills. Roughly how many times does `my_bills()` run `bill_is_complete` when he opens Home, and why? What would change if the query said `order by complete, joined_at desc`?
 20. Hana removes Sam from a bill at the same moment Sam's phone calls `mark_bill_seen` on it. What are the two possible outcomes, and why can't they deadlock?
+21. `private.settle_state` is one `language sql` statement. Describe how three separate `select`s in plpgsql could give an answer that matches no real state of the bill.
+22. Why does `settle_difference` lock Sam's participant row `for no key update` and not `for update`? What would Sam notice if it used `for update`?
+23. `mark_paid` never writes `for no key update`, yet it holds that lock on the caller's row. Where does it come from?
+24. Hana (the payer) calls `settle_difference` to raise Sam's mark from 1510 to 1620. What happens, at which step, and why does the host get the same answer?
 
 ## Learn more
 - PostgreSQL, `CREATE FUNCTION`, "Writing SECURITY DEFINER Functions Safely": https://www.postgresql.org/docs/current/sql-createfunction.html
 - PostgreSQL, privileges (default `EXECUTE` for `PUBLIC`): https://www.postgresql.org/docs/current/ddl-priv.html
 - PostgreSQL, `UPDATE` (column privileges are checked on the columns "listed to be updated"): https://www.postgresql.org/docs/current/sql-update.html
+- PostgreSQL, row-level lock modes (`FOR NO KEY UPDATE` and which `UPDATE`s take it): https://www.postgresql.org/docs/current/explicit-locking.html#LOCKING-ROWS
+- PostgreSQL, Read Committed isolation (a new snapshot for each statement): https://www.postgresql.org/docs/current/transaction-iso.html#XACT-READ-COMMITTED
 - PostgreSQL, trigger behavior (`BEFORE` row triggers can change `NEW`): https://www.postgresql.org/docs/current/trigger-definition.html
 - PostgreSQL, explicit locking (row-level lock modes and how they conflict; deadlocks and lock order): https://www.postgresql.org/docs/current/explicit-locking.html
 - PostgreSQL, `SELECT` (the locking clauses need the `UPDATE` privilege; "SELECT List" says output expressions are evaluated after `ORDER BY` and `LIMIT`): https://www.postgresql.org/docs/current/sql-select.html
