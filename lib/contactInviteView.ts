@@ -20,6 +20,15 @@ export const CONTACT_COPY = {
   whatsAppError: "Couldn't open WhatsApp. Use Share… instead.",
 } as const;
 
+/** What the invite links to: a bill (SharePanel, the default) or a group (GroupInvite, GR-28). */
+export type ContactInviteKind = 'bill' | 'group';
+
+/** The Messages / WhatsApp hints for an invite kind (review R5). A bill invite reads CONTACT_COPY as before. */
+export function contactSendHints(kind: ContactInviteKind): { messages: string; whatsApp: string } {
+  if (kind === 'bill') return { messages: CONTACT_COPY.messagesHint, whatsApp: CONTACT_COPY.whatsAppHint };
+  return { messages: 'Opens a text with the group link filled in', whatsApp: 'Opens WhatsApp with the group link filled in' };
+}
+
 // The label keys expo-contacts passes through (Task 8, PI-N-4), as they read on screen. Keys are
 // compared ignoring case; anything else is a label the person typed and is shown as typed.
 const LABELS: Readonly<Record<string, string>> = {

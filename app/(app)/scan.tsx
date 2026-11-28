@@ -46,6 +46,7 @@ import {
 } from '@/lib/scanScreen';
 import { clearScanResult, setScanResult } from '@/lib/scanSession';
 import { storage } from '@/lib/storage';
+import { backToTabs } from '@/lib/tabsNav';
 import type { RecognitionStage } from '@/lib/textRecognition';
 import { layout, radius, space, type, useTheme } from '@/lib/theme';
 
@@ -346,12 +347,13 @@ function ScanFrame({ intro, children }: { intro?: string; children: ReactNode })
   return (
     <>
       {/*
-        Back to Home on every state (proposal P2): pops to Home when it's under this screen,
-        otherwise opens it. Leaving mid-scan aborts the scan (the unmount cleanup).
+        Back to Home on every state (proposal P2): pops to the tabs when they're under this screen
+        (keeping the tab (+) was pressed on, tab-bar spec criterion 29), otherwise opens them.
+        Leaving mid-scan aborts the scan (the unmount cleanup).
       */}
       <BackHeader
         title="Scan receipt"
-        back={{ label: 'Home', accessibilityLabel: 'Home', accessibilityHint: 'Returns to your bills', onPress: () => router.dismissTo('/') }}
+        back={{ label: 'Home', accessibilityLabel: 'Home', accessibilityHint: 'Returns to your bills', onPress: () => backToTabs(router) }}
       />
       <ScrollView
         style={{ backgroundColor: colors.background }}

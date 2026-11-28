@@ -18,6 +18,22 @@ create extension if not exists pgtap with schema extensions;
 
 select plan(71);
 
+-- Who paid 4a (20261127140001): the mark columns moved off bill_participants into
+-- public.bill_payments / bill_payment_flags. This temp view gives each participant's old columns
+-- (their pair toward the bill's current payer, contract P; the flag to that payer) so the
+-- readbacks below keep their shape. Read as the owner only (it is not granted to client roles).
+create temp view bp_marks as
+select bp.bill_id, bp.user_id, bp.added, bp.joined_at,
+       case when ps.net > 0 then ps.mark_at end as settled_at,
+       case when ps.net > 0 then ps.net::integer end as settled_cents,
+       case when ps.net > 0 then ps.method end as settled_method,
+       f.cents as not_received_cents, f.method as not_received_method, f.to_user as not_received_by
+from public.bill_participants as bp
+join public.bills as b on b.id = bp.bill_id
+cross join lateral private.pair_state(bp.bill_id, bp.user_id, b.payer_id) as ps
+left join public.bill_payment_flags as f
+  on f.bill_id = bp.bill_id and f.from_user = bp.user_id and f.to_user = b.payer_id;
+
 insert into auth.users (id, email, raw_user_meta_data) values
   ('5e100000-0000-0000-0000-000000000001', 'early-hana@test.local', '{"full_name":"Hana"}'::jsonb),
   ('5e200000-0000-0000-0000-000000000002', 'early-sam@test.local', '{"full_name":"Sam"}'::jsonb),
@@ -76,23 +92,24 @@ begin
 end $$;
 
 -- Accepted: the user's row holds exactly p_cents, and the bill has exactly one marked_paid event,
--- by the user, with details {payer_id: Hana, cents: p_cents}.
+-- by the user, with details {payer_id: Hana, cents: p_cents, method: other}.
 create function pg_temp.marked(p_tag text, p_user uuid, p_cents integer) returns boolean
 language sql stable as $$
   select coalesce((select bp.settled_cents = p_cents and bp.settled_at is not null
-                   from public.bill_participants as bp
+                   from pg_temp.bp_marks as bp
                    where bp.bill_id = pg_temp.bid(p_tag) and bp.user_id = p_user), false)
      and (select count(*) = 1 from public.bill_events as e
           where e.bill_id = pg_temp.bid(p_tag) and e.kind = 'marked_paid')
      and (select count(*) = 1 from public.bill_events as e
           where e.bill_id = pg_temp.bid(p_tag) and e.kind = 'marked_paid'
             and e.actor_id = p_user
-            and e.details = jsonb_build_object('payer_id', pg_temp.hana(), 'cents', p_cents));
+            and e.details = jsonb_build_object('payer_id', pg_temp.hana(), 'cents', p_cents,
+                                           'method', 'other'));
 $$;
 
 -- Refused: nobody on the bill is marked and the bill has no marked_paid event.
 create function pg_temp.unmarked(p_tag text) returns boolean language sql stable as $$
-  select not exists (select 1 from public.bill_participants as bp
+  select not exists (select 1 from pg_temp.bp_marks as bp
                      where bp.bill_id = pg_temp.bid(p_tag) and bp.settled_at is not null)
      and not exists (select 1 from public.bill_events as e
                      where e.bill_id = pg_temp.bid(p_tag) and e.kind = 'marked_paid');
@@ -190,7 +207,7 @@ begin
   perform pg_temp.claim(pg_temp.hana(), 'e13', 'Burger');
   perform pg_temp.claim(pg_temp.sam(), 'e13', 'Salad');
   perform pg_temp.act(pg_temp.sam());
-  perform public.mark_paid(pg_temp.bid('e13'), pg_temp.hana(), 900);
+  perform public.mark_paid(pg_temp.bid('e13'), pg_temp.hana(), 900, 'other');
   perform pg_temp.act(pg_temp.hana());
   perform public.set_extras_split(pg_temp.bid('e13'), 'equal');
 
@@ -237,12 +254,16 @@ reset role;
 -- Backdate Sam's E13 mark before saving the baseline. mark_paid set settled_at = now(), and now()
 -- is fixed for the whole test transaction, so without this a regression that rewrote
 -- settled_at = now() would still compare equal and the E13 "same settled_at" check could not fail.
-update public.bill_participants as bp
-   set settled_at = timestamptz '2026-01-01 12:00:00+00'
- where bp.bill_id = pg_temp.bid('e13') and bp.user_id = pg_temp.sam();
+-- (Who paid 4a: the mark is Sam's bill_payments entry, whose rows can't be updated; the test
+-- lifts that guard for the backdate only, as the owner.)
+alter table public.bill_payments disable trigger bill_payments_no_update;
+update public.bill_payments as e
+   set recorded_at = timestamptz '2026-01-01 12:00:00+00'
+ where e.bill_id = pg_temp.bid('e13') and e.from_user = pg_temp.sam();
+alter table public.bill_payments enable trigger bill_payments_no_update;
 
 -- Sam's E13 mark before the switch (criterion 2 compares against it).
-select set_config('test.e13_at', (select bp.settled_at::text from public.bill_participants as bp
+select set_config('test.e13_at', (select bp.settled_at::text from pg_temp.bp_marks as bp
   where bp.bill_id = pg_temp.bid('e13') and bp.user_id = pg_temp.sam()), true);
 
 -- ---------------------------------------------------------------------------
@@ -294,53 +315,53 @@ select is(private.settle_state(pg_temp.bid('e20'), pg_temp.sam()), 'not_complete
 -- ---------------------------------------------------------------------------
 set local role authenticated;
 select pg_temp.act(pg_temp.sam());
-select lives_ok($$ select public.mark_paid(pg_temp.bid('e1'), pg_temp.hana(), 900) $$,
+select lives_ok($$ select public.mark_paid(pg_temp.bid('e1'), pg_temp.hana(), 900, 'other') $$,
   '[E1] mark_paid 900 is accepted');
-select throws_ok($$ select public.mark_paid(pg_temp.bid('e2'), pg_temp.hana(), 900) $$,
+select throws_ok($$ select public.mark_paid(pg_temp.bid('e2'), pg_temp.hana(), 900, 'other') $$,
   '22023', 'not_complete', '[E2] mark_paid raises 22023 not_complete');
-select throws_ok($$ select public.mark_paid(pg_temp.bid('e3'), pg_temp.hana(), 900) $$,
+select throws_ok($$ select public.mark_paid(pg_temp.bid('e3'), pg_temp.hana(), 900, 'other') $$,
   '22023', 'not_complete', '[E3] mark_paid raises 22023 not_complete');
-select lives_ok($$ select public.mark_paid(pg_temp.bid('e4'), pg_temp.hana(), 1) $$,
+select lives_ok($$ select public.mark_paid(pg_temp.bid('e4'), pg_temp.hana(), 1, 'other') $$,
   '[E4] mark_paid 1 is accepted (the UI hides the button; the DB allows it, PI-M-1)');
-select throws_ok($$ select public.mark_paid(pg_temp.bid('e5'), pg_temp.hana(), 900) $$,
+select throws_ok($$ select public.mark_paid(pg_temp.bid('e5'), pg_temp.hana(), 900, 'other') $$,
   '22023', 'not_complete', '[E5] mark_paid raises 22023 not_complete');
-select lives_ok($$ select public.mark_paid(pg_temp.bid('e6'), pg_temp.hana(), 500) $$,
+select lives_ok($$ select public.mark_paid(pg_temp.bid('e6'), pg_temp.hana(), 500, 'other') $$,
   '[E6] mark_paid 500 is accepted (PI-M-1, unchanged)');
-select lives_ok($$ select public.mark_paid(pg_temp.bid('e7'), pg_temp.hana(), 200) $$,
+select lives_ok($$ select public.mark_paid(pg_temp.bid('e7'), pg_temp.hana(), 200, 'other') $$,
   '[E7] mark_paid 200 is accepted');
-select throws_ok($$ select public.mark_paid(pg_temp.bid('e8'), pg_temp.hana(), 1) $$,
+select throws_ok($$ select public.mark_paid(pg_temp.bid('e8'), pg_temp.hana(), 1, 'other') $$,
   '22023', 'all_zero', '[E8] mark_paid raises 22023 all_zero (was accepted; K6 closed)');
-select throws_ok($$ select public.mark_paid(pg_temp.bid('e9'), pg_temp.hana(), 1) $$,
+select throws_ok($$ select public.mark_paid(pg_temp.bid('e9'), pg_temp.hana(), 1, 'other') $$,
   '22023', 'all_zero', '[E9] mark_paid raises 22023 all_zero, not not_complete');
-select lives_ok($$ select public.mark_paid(pg_temp.bid('e10'), pg_temp.hana(), 1) $$,
+select lives_ok($$ select public.mark_paid(pg_temp.bid('e10'), pg_temp.hana(), 1, 'other') $$,
   '[E10] mark_paid 1 is accepted');
-select lives_ok($$ select public.mark_paid(pg_temp.bid('e11'), pg_temp.hana(), 400) $$,
+select lives_ok($$ select public.mark_paid(pg_temp.bid('e11'), pg_temp.hana(), 400, 'other') $$,
   '[E11] mark_paid 400 is accepted');
-select lives_ok($$ select public.mark_paid(pg_temp.bid('e12'), pg_temp.hana(), 250) $$,
+select lives_ok($$ select public.mark_paid(pg_temp.bid('e12'), pg_temp.hana(), 250, 'other') $$,
   '[E12] mark_paid 250 is accepted');
-select throws_ok($$ select public.mark_paid(pg_temp.bid('e13'), pg_temp.hana(), 950) $$,
+select throws_ok($$ select public.mark_paid(pg_temp.bid('e13'), pg_temp.hana(), 950, 'other') $$,
   '22023', 'not_complete', '[E13] a second mark_paid after the switch raises 22023 not_complete');
-select lives_ok($$ select public.mark_paid(pg_temp.bid('e15'), pg_temp.hana(), 1) $$,
+select lives_ok($$ select public.mark_paid(pg_temp.bid('e15'), pg_temp.hana(), 1, 'other') $$,
   '[E15] mark_paid 1 is accepted');
-select lives_ok($$ select public.mark_paid(pg_temp.bid('e16'), pg_temp.hana(), 600) $$,
+select lives_ok($$ select public.mark_paid(pg_temp.bid('e16'), pg_temp.hana(), 600, 'other') $$,
   '[E16] mark_paid 600 is accepted');
-select lives_ok($$ select public.mark_paid(pg_temp.bid('e17'), pg_temp.hana(), 1) $$,
+select lives_ok($$ select public.mark_paid(pg_temp.bid('e17'), pg_temp.hana(), 1, 'other') $$,
   '[E17] mark_paid 1 is accepted (UI hides the button: share $0)');
-select throws_ok($$ select public.mark_paid(pg_temp.bid('e18'), pg_temp.hana(), 1) $$,
+select throws_ok($$ select public.mark_paid(pg_temp.bid('e18'), pg_temp.hana(), 1, 'other') $$,
   '22023', 'all_zero', '[E18] mark_paid raises 22023 all_zero');
-select lives_ok($$ select public.mark_paid(pg_temp.bid('e19'), pg_temp.hana(), 600) $$,
+select lives_ok($$ select public.mark_paid(pg_temp.bid('e19'), pg_temp.hana(), 600, 'other') $$,
   '[E19] mark_paid 600 is accepted');
-select throws_ok($$ select public.mark_paid(pg_temp.bid('e20'), pg_temp.hana(), 900) $$,
+select throws_ok($$ select public.mark_paid(pg_temp.bid('e20'), pg_temp.hana(), 900, 'other') $$,
   '22023', 'not_complete', '[E20] mark_paid raises 22023 not_complete');
 select pg_temp.act(pg_temp.hana());
-select throws_ok($$ select public.mark_paid(pg_temp.bid('e1'), pg_temp.hana(), 900) $$,
+select throws_ok($$ select public.mark_paid(pg_temp.bid('e1'), pg_temp.hana(), 900, 'other') $$,
   '22023', 'is_payer', '[E14] Hana (the payer) gets 22023 is_payer (checked before rule E)');
 
 -- Criterion 3: check order.
-select throws_ok($$ select public.mark_paid(pg_temp.bid('e2'), pg_temp.hana(), 0) $$,
+select throws_ok($$ select public.mark_paid(pg_temp.bid('e2'), pg_temp.hana(), 0, 'other') $$,
   '22023', 'invalid_amount', 'c3: the payer sending p_cents 0 gets invalid_amount, not is_payer');
 select pg_temp.act('5e300000-0000-0000-0000-000000000003');
-select throws_ok($$ select public.mark_paid(pg_temp.bid('e1'), pg_temp.hana(), 0) $$,
+select throws_ok($$ select public.mark_paid(pg_temp.bid('e1'), pg_temp.hana(), 0, 'other') $$,
   '42501', 'not_allowed', 'c3: a non-participant gets 42501 before any amount check');
 reset role;
 
@@ -364,11 +385,11 @@ select ok(pg_temp.marked('e12', pg_temp.sam(), 250), '[E12] Sam''s row holds 250
 select ok(
   pg_temp.marked('e13', pg_temp.sam(), 900)
   and (select bp.settled_at = current_setting('test.e13_at')::timestamptz
-       from public.bill_participants as bp
+       from pg_temp.bp_marks as bp
        where bp.bill_id = pg_temp.bid('e13') and bp.user_id = pg_temp.sam()),
   '[E13] Sam''s earlier mark is kept (900, same settled_at) and the refused call logged nothing');
 select ok(
-  not exists (select 1 from public.bill_participants as bp
+  not exists (select 1 from pg_temp.bp_marks as bp
               where bp.bill_id = pg_temp.bid('e1') and bp.user_id = pg_temp.hana()
                 and bp.settled_at is not null)
   and not exists (select 1 from public.bill_events as e
@@ -417,12 +438,12 @@ select throws_ok($$ select private.bill_all_zero(pg_temp.bid('e1')) $$,
 reset role;
 select ok(
   (select prosecdef and proconfig = array['search_path=""'] from pg_proc
-   where oid = 'public.mark_paid(uuid,uuid,integer)'::regprocedure),
+   where oid = 'public.mark_paid(uuid,uuid,integer,text,text)'::regprocedure),
   'c4: mark_paid is still security definer with an empty search_path');
 select ok(
-  has_function_privilege('authenticated', 'public.mark_paid(uuid,uuid,integer)', 'execute')
-  and not has_function_privilege('anon', 'public.mark_paid(uuid,uuid,integer)', 'execute')
-  and not has_function_privilege('public', 'public.mark_paid(uuid,uuid,integer)', 'execute'),
+  has_function_privilege('authenticated', 'public.mark_paid(uuid,uuid,integer,text,text)', 'execute')
+  and not has_function_privilege('anon', 'public.mark_paid(uuid,uuid,integer,text,text)', 'execute')
+  and not has_function_privilege('public', 'public.mark_paid(uuid,uuid,integer,text,text)', 'execute'),
   'c4: mark_paid is executable by authenticated only');
 
 -- ---------------------------------------------------------------------------
@@ -432,14 +453,14 @@ select ok(
   (select position('public.bill_participants' in p.prosrc) > 0
           and position('public.bill_participants' in p.prosrc) < position('for share' in p.prosrc)
           and position('for share' in p.prosrc) < position('private.settle_state' in p.prosrc)
-          and position('private.settle_state' in p.prosrc) < position('update public.bill_participants' in p.prosrc)
-   from pg_proc as p where p.oid = 'public.mark_paid(uuid,uuid,integer)'::regprocedure),
-  'c6: mark_paid reads participation before FOR SHARE on bills, then settle_state, then the update');
+          and position('private.settle_state' in p.prosrc) < position('insert into public.bill_payments' in p.prosrc)
+   from pg_proc as p where p.oid = 'public.mark_paid(uuid,uuid,integer,text,text)'::regprocedure),
+  'c6: mark_paid reads participation before FOR SHARE on bills, then settle_state, then the ledger insert');
 select ok(
   (select position('for update' in p.prosrc) = 0
           and (length(p.prosrc) - length(replace(p.prosrc, 'private.settle_state', '')))
               / length('private.settle_state') = 1
-   from pg_proc as p where p.oid = 'public.mark_paid(uuid,uuid,integer)'::regprocedure),
+   from pg_proc as p where p.oid = 'public.mark_paid(uuid,uuid,integer,text,text)'::regprocedure),
   'c6: mark_paid takes no explicit FOR UPDATE and calls settle_state exactly once');
 
 select * from finish();

@@ -4,6 +4,7 @@
 import { act, fireEvent, renderRouter, screen, waitFor } from 'expo-router/testing-library';
 import { AccessibilityInfo, Platform } from 'react-native';
 
+import { BILL_ERROR_COPY } from '@/lib/bills';
 import { savePendingInvite } from '@/lib/pendingInvite';
 import { storage as realStorage } from '@/lib/storage';
 import { supabase as realSupabase } from '@/lib/supabase';
@@ -57,6 +58,8 @@ const personRow = (userId: string, bills: number): PersonRow => ({
 
 const db: {
   payer: string;
+  /** bill_payers rows (who paid, split mode); empty = one person (payer_id). */
+  payers: { user_id: string; paid_cents: number }[];
   participants: Participant[];
   claims: Claim[];
   people: PersonRow[];
@@ -65,10 +68,11 @@ const db: {
   /** Per function: a result to return instead of doing the change, or a promise to wait on first. */
   answer: Partial<Record<string, FakeResult>>;
   hold: Partial<Record<string, Promise<void>>>;
-} = { payer: A, participants: [], claims: [], people: [], failBills: false, noBill: false, answer: {}, hold: {} };
+} = { payer: A, payers: [], participants: [], claims: [], people: [], failBills: false, noBill: false, answer: {}, hold: {} };
 
 function reset() {
   db.payer = A;
+  db.payers = [];
   db.participants = [participant(A, 0), participant(B, 5)];
   db.claims = [];
   db.people = [personRow(SAM, 4), personRow(B, 2), personRow(ALI, 1)];
@@ -95,6 +99,7 @@ function installFakes() {
       total_discount_cents: 0,
       total_cents: 2100,
       join_code: CODE,
+      group_id: null, // bills.group_id: fetchBillGroup reads it (a bill in no group)
       created_at: '2026-11-20T19:00:00Z',
       edited_at: null,
       extras_split: 'proportional',
@@ -108,6 +113,7 @@ function installFakes() {
   );
   supabase.__setTable('bill_participants', () => ok(db.participants.map((p) => ({ ...p }))));
   supabase.__setTable('claims', () => ok(db.claims.map((c) => ({ ...c }))));
+  supabase.__setTable('bill_payers', () => ok(db.payers.map((p) => ({ ...p }))));
   supabase.__setRpc(async (fn, args) => {
     const hold = db.hold[fn];
     if (hold) await hold;
@@ -424,6 +430,89 @@ describe.each(['ios', 'web'] as const)('Add people (%s)', (os) => {
     expect(await screen.findByText("Couldn't remove them. They may have just claimed an item.")).toBeTruthy();
     await waitFor(() => expect(billFetches()).toBeGreaterThan(before));
     await waitFor(() => expect(screen.queryByLabelText('Remove Sam Lee from this bill')).toBeNull());
+  });
+
+  // ----- Who paid S12: a payer can't be removed, and the screen says why before any tap -----
+
+  const SAM_NOTE = 'Sam Lee paid part of the bill. Change who paid first.';
+  const CHANGE_FOR_SAM = 'Change who paid before removing Sam Lee';
+
+  it('S12: a co-payer has no Remove; the reason and "Change who paid" show in its place, and it opens the Who paid page', async () => {
+    db.participants = [participant(A, 0), participant(B, 5), participant(SAM, 9)];
+    db.payers = [
+      { user_id: A, paid_cents: 1200 },
+      { user_id: SAM, paid_cents: 900 },
+    ];
+    const router = renderRouter(ROUTES, { initialUrl: `/bills/${BILL}/people` });
+    // Positive control: Bo (no payment, no claims) still has Remove, so the rows have landed.
+    await screen.findByLabelText('Remove Bo from this bill');
+    expect(screen.getByText(SAM_NOTE)).toBeTruthy();
+    expect(screen.queryByLabelText('Remove Sam Lee from this bill')).toBeNull();
+    // The row's label says everything it shows (web drops hints, so the label carries the reason).
+    expect(rowLabels().filter((l) => !l.includes('together'))).toEqual(['You, no items yet', 'Bo, no items yet', `Sam Lee, no items yet. ${SAM_NOTE}`]);
+    const change = screen.getByLabelText(CHANGE_FOR_SAM);
+    expect(change.props.accessibilityRole).toBe('button');
+    expect(change.props.accessibilityHint).toBe('Opens Who paid, where you can change it');
+    if (os === 'web') {
+      // react-native-web reads aria-* (not accessibilityState): an enabled, idle button carries neither.
+      expect(change.props['aria-disabled']).toBeUndefined();
+      expect(change.props['aria-busy']).toBeUndefined();
+    }
+    // Only Sam's row has one: the host's own row and Bo's don't.
+    expect(screen.getAllByLabelText(/^Change who paid before removing /)).toHaveLength(1);
+    await act(async () => {
+      fireEvent.press(change);
+    });
+    await waitFor(() => expect(router.getPathname()).toBe(`/bills/${BILL}/payers`));
+    expect(calls('remove_participant')).toHaveLength(0);
+  });
+
+  it('S12: the one payer (not the host) gets the one-person line instead of Remove', async () => {
+    db.payer = SAM;
+    db.participants = [participant(A, 0), participant(B, 5), participant(SAM, 9)];
+    renderRouter(ROUTES, { initialUrl: `/bills/${BILL}/people` });
+    await screen.findByLabelText('Remove Bo from this bill');
+    expect(screen.getByText('Sam Lee paid the bill. Change who paid first.')).toBeTruthy();
+    expect(screen.queryByLabelText('Remove Sam Lee from this bill')).toBeNull();
+    expect(screen.getByLabelText(CHANGE_FOR_SAM)).toBeTruthy();
+  });
+
+  it('S12: Sam became a co-payer after the screen loaded: cannot_remove refetches, and the reason replaces Remove', async () => {
+    db.participants = [participant(A, 0), participant(B, 5), participant(SAM, 9)];
+    db.answer.remove_participant = { data: null, error: { code: '22023', message: 'cannot_remove' } };
+    renderRouter(ROUTES, { initialUrl: `/bills/${BILL}/people` });
+    const remove = await screen.findByLabelText('Remove Sam Lee from this bill');
+    expect(screen.queryByText(SAM_NOTE)).toBeNull();
+    db.payers = [
+      { user_id: A, paid_cents: 1200 },
+      { user_id: SAM, paid_cents: 900 },
+    ];
+    const before = billFetches();
+    await act(async () => {
+      fireEvent.press(remove);
+    });
+    await waitFor(() => expect(billFetches()).toBeGreaterThan(before));
+    expect(await screen.findByText(SAM_NOTE)).toBeTruthy();
+    expect(screen.queryByLabelText('Remove Sam Lee from this bill')).toBeNull();
+    expect(screen.getByLabelText(CHANGE_FOR_SAM)).toBeTruthy();
+    // The row's reason explains it; the shared "may have just claimed an item" line would contradict it.
+    expect(screen.queryByText(BILL_ERROR_COPY.cannot_remove)).toBeNull();
+  });
+
+  it('positive control: cannot_remove for someone who did not become a payer keeps the shared line', async () => {
+    db.participants = [participant(A, 0), participant(B, 5), participant(SAM, 9)];
+    db.answer.remove_participant = { data: null, error: { code: '22023', message: 'cannot_remove' } };
+    renderRouter(ROUTES, { initialUrl: `/bills/${BILL}/people` });
+    const remove = await screen.findByLabelText('Remove Sam Lee from this bill');
+    db.claims = [{ line_item_id: BURGER, user_id: SAM, parts: 1 }]; // Sam claimed just now
+    const before = billFetches();
+    await act(async () => {
+      fireEvent.press(remove);
+    });
+    await waitFor(() => expect(billFetches()).toBeGreaterThan(before));
+    await waitFor(() => expect(screen.queryByLabelText('Remove Sam Lee from this bill')).toBeNull());
+    expect(screen.getByText(BILL_ERROR_COPY.cannot_remove)).toBeTruthy();
+    expect(screen.queryByText(SAM_NOTE)).toBeNull();
   });
 
   // ----- Empty states -----

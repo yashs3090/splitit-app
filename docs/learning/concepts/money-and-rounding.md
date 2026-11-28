@@ -208,6 +208,15 @@ Sam is marked at 1510¢:
 
 **Why the database has no tolerance, and why that isn't two different money rules.** The database never compares a mark with a share. It can't: shares come from `computeShares`, which exists only in `lib/`. `settle_difference` just records "from X to Y", checking that X is the current mark and that Y is a valid amount. So a direct API call that records a 1¢ difference is accepted (case D5). The tolerance is only about which differences the app *asks* people to settle, not a rule about which amounts are valid. The rules that both sides do enforce (rule E for who may pay, rule Z for all-$0 bills, the C2 amount range) are written in both places and tested on the same cases.
 
+### Several payers: paid amounts add up exactly (rule W, 2026-11-27)
+*From spec `docs/specs/2026-11-26-who-paid.md` (D1) and [ADR 0023](../decisions/0023-several-payers.md). Who pays whom after that is in [who pays whom](who-pays-whom.md).*
+
+When the paying is split ("I paid $60.00, Sam paid $40.21"), the amounts must add up to the bill total **exactly**: tolerance 0, not the totals check's 1¢. Typed amounts aren't rounded from anything, so a gap is always a typo. The same rule sits in `validateSplit` (`lib/payers.ts`) and `set_payers` in SQL, with sums kept as safe integers in JS and `bigint` in SQL, and both are tested on the same table W (W1 6000 + 4021 on a 10021 bill: ok; W2 one cent short: refused with a gap of 1¢; W3 one cent over: a gap of −1¢).
+
+**Percent mode** on the Who paid page uses largest remainder (`percentsToCents` in `lib/payersForm.ts`), so 100% always lands on the total. $100.21 at 50% / 50% is 5010.5¢ each: floors 5010 + 5010, and the spare cent goes to the first row, so $50.11 and $50.10. A row whose percentage rounds to $0.00 is refused rather than silently dropped (WP-R10). Switching between $ and % keeps each row's exact cents (`keptCents`); before that fix, a bill over $100 could lose a cent on a round trip (QA A-50(c)).
+
+**If the total changes later** (a new tip), the stored amounts no longer add up. That's a "stale" split: settling pauses until the host fixes it, on both sides (`blocked_payers` in `lib/settle.ts`, `22023 payers_stale` in SQL).
+
 ### Claimable discounts (ADR 0017, 2026-11-24)
 A bill-level discount is normally an extra, so it lowers everyone's share. But some discounts belong to one person: a comp on their meal, a coupon they brought. So each discount row in the bill form has a switch, **"Claim like an item"** (off by default). When it's on, the discount becomes a bill row that people claim and share by parts, exactly like an item ([ADR 0017](../decisions/0017-claimable-discounts.md)).
 
@@ -295,6 +304,8 @@ It's the same integer string math as the receipt parser: a regex splits dollars 
 - Expecting an early share to be *exactly* stable. Rounding can move it by 1¢ (the worked example above). Code that compares a mark with a share needs the 1¢ tolerance, or it asks people to send $0.01.
 - Storing a $0 mark for "paid back in full". It would need its own card, couldn't be undone, and would stop the person leaving the bill. Clear the mark instead; Activity keeps the history.
 - Paying back more than the mark when a share goes negative. Pay-backs stop at $0; the rest is settled outside the app.
+- Allowing a 1¢ gap on paid amounts "like the totals check". Typed amounts aren't rounded, so rule W is exact on both sides.
+- Converting a row's cents to a percentage and back on every unit switch. The round trip can lose a cent. Keep the exact cents and show the percentage only.
 
 ## Check yourself
 1. Allocate a 1000¢ tip across subtotals 2000¢, 1000¢, 1000¢.
@@ -317,6 +328,7 @@ It's the same integer string math as the receipt parser: a regex splits dollars 
 18. On a proportional bill, Sam paid early. Dee then claims the last unclaimed item. Why does Sam's share stay the same (or move by at most 1¢)? What would happen on an even-mode bill?
 19. Sam marked $15.10 and his share is now $15.11. Why doesn't the app ask him to pay 1¢, and what does the database do if a script records 1510 → 1511 anyway?
 20. Sam marked $15.10, and after a coupon his share is −$1.00. How much does Hana pay back through the app, what happens to Sam's mark, and what happens to the other $1.00?
+21. Hana and Sam split the paying of a $100.21 bill as $60.00 and $40.20. Why is that refused, when the bill form's totals check would allow a 1¢ difference?
 
 ## Learn more
 - Largest remainder method: https://en.wikipedia.org/wiki/Largest_remainder_method

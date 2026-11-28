@@ -37,7 +37,7 @@ Sign-in is **Google only** ([ADR 0008](../decisions/0008-google-only-sign-in.md)
 - **One-shot:** `takePendingInvite` reads the invite *and deletes it*, so an old invite can't hijack a later sign-in.
 - **24-hour expiry:** a stale invite on a shared device is dropped.
 - **Validated twice:** when saved and when read. The code must match `[A-Za-z0-9_-]{10,64}`.
-- **No open redirect:** after sign-in, `postSignInRoute` can only return `/` or `/b/<valid code>`. It never accepts a URL from the request. (An **open redirect** is when your site will forward users to any URL given in a parameter. Phishers abuse it to make evil links look like they're on your domain.)
+- **No open redirect:** after sign-in, `postSignInRoute` can only return `/` or `/b/<valid code>` (and, since group invites on 2026-11-27, `/g/<valid code>`). It never accepts a URL from the request. (An **open redirect** is when your site will forward users to any URL given in a parameter. Phishers abuse it to make evil links look like they're on your domain.)
 
 **Resume in exactly one place:** `ResumeAfterSignIn` in `app/_layout.tsx` runs when the session goes from signed-out to signed-in, *and* on first load. The first-load case is how the web redirect gets resumed. One place means no two screens can fight over where to navigate. The reviewer found a case where `/auth/callback` *could* fight it on Android, so that screen now defers to the root as well.
 
@@ -91,6 +91,33 @@ Local `supabase/config.toml` (`additional_redirect_urls`) only configures the **
 ### Why share links don't open on friends' phones (yet)
 `inviteUrl` uses `Linking.createURL`, so links are `http://localhost:8081/b/<code>` on web and `splitit://b/<code>` on native. Messaging apps usually don't make custom schemes tappable, friends don't have the app, and `localhost` is their own device. The fix is a hosted web app (the friend-test deploy, Vercel) and building links from its `https://` address; universal links come with a real domain.
 
+### Universal Links / App Links, prepared but off (added 2026-11-26)
+Both platforms need two halves that vouch for each other: the **app** says "I handle links on this host" (iOS: the `applinks:<host>` entitlement; Android: an intent filter with `autoVerify`), and the **website** says "this app may" (`/.well-known/apple-app-site-association` naming `<TeamID>.<bundle id>`; `/.well-known/assetlinks.json` naming the package and its signing-key fingerprints). Only when both match does the OS hand the `https://` link to the app instead of the browser. That's why it needs the paid Apple team (the team ID is part of the app's identity, and a free team can't sign the entitlement) and the exact signing keys (with Play App Signing, Google's key, not yours). SplitIt switches each half on from build-time env vars (`APPLE_TEAM_ID`, `ANDROID_CERT_SHA256`) in `app.config.ts` and `scripts/write-well-known.ts`, so the free build keeps working. Expo Router needs no code: it strips the origin from an `https://` URL and routes `/b/<code>` like `splitit://b/<code>`. Steps: [app links guide](../../setup/app-links.md).
+
+### Tabs under the stack: where Back goes after a deep link (added 2026-11-28)
+*From the tab bar and Activity feed ([ADR 0025](../decisions/0025-tab-bar-and-activity.md), spec `docs/specs/2026-11-28-tab-bar-and-activity.md` Task 5, criteria 29–34).*
+
+The app has a bottom tab bar now: Tabs · Groups · (+) · Activity · Profile. A bill, a group, `/scan` and the new-bill form are **pushed above** the tabs, so they show without the bar. Picture a stack of cards: the tabs are the bottom card, and a bill is a card on top. Back takes the top card off.
+
+```
+app/(app)/_layout.tsx          Stack (auth guard)
+├── (tabs)/_layout.tsx         Tabs: index (Tabs), groups, activity, profile
+├── bills/[id]/…               pushed above the tabs
+├── groups/[id]/…, groups/new
+├── scan, bill, account
+app/b/[code].tsx, app/g/[code].tsx   join by link, then replace with the bill or group
+```
+
+The problem is a **deep link**. If Sam taps a link to `/bills/<id>` with the app closed, the app opens straight on the bill. Nothing is under it, so Back has nowhere to go. Three pieces fix that:
+
+1. **The anchor.** `app/(app)/_layout.tsx` exports `unstable_settings = { initialRouteName: '(tabs)' }`. When the app builds its history from a URL, it puts `(tabs)` underneath first. So a cold start on `/bills/<id>` gives "Tabs, then the bill", and Back lands on Tabs. Expo's docs say the anchor is used only for deep links. During normal in-app navigation, the screen you came from is what's underneath. Expo's docs now call this setting `anchor` and list `initialRouteName` as the older name. The code comment records that expo-router 57.0.31 reads `anchor ?? initialRouteName`, so both work there.
+2. **`withAnchor` on `/b` and `/g`.** Joining by link happens on `app/b/[code].tsx` (or `app/g/[code].tsx`), which then calls `router.replace('/bills/<id>', { withAnchor: true })`. A plain `replace` would swap the join screen for the bill with nothing under it. `withAnchor` tells the router to load the anchor route (the tabs) below the target, so Back from the bill reaches Tabs (criteria 32b, 32f).
+3. **`backToTabs`** in `lib/tabsNav.ts`. A pushed screen's "Home" button calls it. If there's something to pop (`router.canDismiss()`), it pops the whole stack (`dismissAll`), which keeps whichever tab you were on: open a bill from Activity, tap Home, and you're back on Activity with its filter and scroll. If nothing is below (a screen that replaced its way in), it opens `/` instead, which lands on Tabs. The older `dismissTo('/')` would have switched you to Tabs every time.
+
+Two more details:
+- **Profile from Settle.** Settle's and `VenmoPrompt`'s "add your Venmo" links open `/account` (`app/(app)/account.tsx`), a copy of Profile with a Back header. Switching to the Profile *tab* would leave Settle behind, because Settle sits above the tabs (FEED-25, criterion 41).
+- **Sign-in resume didn't change.** `ResumeAfterSignIn` still sends you to `/` (now the Tabs tab), or to `/b/<code>` or `/g/<code>` for a pending invite. Those join screens then open the bill or group with `withAnchor`, so the tabs end up under it (criteria 32a–32c).
+
 ### Google's "Testing" mode
 While the Google consent screen is in Testing, only Gmail accounts listed as **test users** can sign in. Every friend must be added, or the app published (privacy policy, possibly Google's review).
 
@@ -101,6 +128,9 @@ While the Google consent screen is in Testing, only Gmail accounts listed as **t
 - OAuth redirect URLs must be allow-listed in Supabase Auth settings for each platform (scheme, Expo Go, web origin).
 - Storing tokens in plain `AsyncStorage` on native. Use secure storage for the refresh token.
 - Treating the JWT's contents as secret. They're only signed, not encrypted, so anyone can read them. Never put private data in custom claims.
+- **A `replace` after a join with nothing under it.** The screen opens fine, but Back has nowhere to go inside the app. Pass `{ withAnchor: true }` so the tabs load underneath.
+- **`dismissTo('/')` for "Home".** It works, but it always switches to the Tabs tab, so someone who opened a bill from Activity loses their place. Use `backToTabs`.
+- **Testing only in-app navigation.** The anchor only applies to deep links, so a test that taps through from Tabs never checks it. Test a cold start on `/bills/<id>` and `/groups/<id>` too (criterion 32e).
 
 ## Check yourself
 1. What's the difference between an access token and a refresh token, and why have both?
@@ -109,6 +139,8 @@ While the Google consent screen is in Testing, only Gmail accounts listed as **t
 4. Which of the two allow-lists stops an attacker from catching Google's code? Which one stops them catching Supabase's?
 5. A malicious app registers `splitit://` and receives the hop-2 code. Why can't it sign in as the user?
 6. Sign-in on a phone ends on `http://localhost:8081/?code=…`. What's missing, and where do you fix it?
+7. Sam taps a group link, joins on `/g/<code>`, and lands on the group. What would Back do if the join screen used a plain `router.replace`? What does `withAnchor` change?
+8. You open Maya's bill from the Activity tab and tap "Home". Where do you land, and why would `dismissTo('/')` land somewhere else?
 
 ## Learn more
 - https://supabase.com/docs/guides/auth/native-mobile-deep-linking
@@ -116,3 +148,5 @@ While the Google consent screen is in Testing, only Gmail accounts listed as **t
 - https://jwt.io/introduction
 - https://supabase.com/docs/guides/auth/redirect-urls
 - https://oauth.net/2/pkce/
+- Expo Router, router settings (`anchor`, formerly `initialRouteName`, and `withAnchor`): https://docs.expo.dev/router/advanced/router-settings/
+- Expo Router, tabs: https://docs.expo.dev/router/advanced/tabs/

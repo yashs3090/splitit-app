@@ -46,3 +46,36 @@ Work the user has asked for, waiting for its turn. Each item has the user's deci
 5. **Still failing:** a friendly screen with "Retake photo" or "Type it in", plus what we did read pre-filled so nothing is lost.
 
 **OpenCV on web (open question):** opencv.js is ~10–13 MB. If added, it must be lazy-loaded only when someone scans on web, used for receipt edge detection + perspective correction (what the phone scanners already do natively), and kept only if it measurably improves the receipt eval.
+
+## 4. Who paid: change the payer, or split the paying between people (queued 2026-11-26) — BUILT 2026-11-27
+
+- **Follow-up (from the Activity feed spec, FEED-8, 2026-11-28):** the `unmarked_paid` event details are `{user_id, cents}` and don't record who the payment was to. The feed therefore can't show a sender undoing their own payment. Fix: add `payer_id` to the details in `unmark_paid` (a small migration) and have `describeEvent` read it. Not needed now.
+**Status (2026-11-27, each line checked against the code that day):** built on the local stack; not pushed to the hosted project (the user's call, in the order in `docs/before-production.md` §4). Spec `docs/specs/2026-11-26-who-paid.md` with Amendments A1 and A2; [ADR 0023](learning/decisions/0023-several-payers.md); concept note [who pays whom](learning/concepts/who-pays-whom.md).
+- **Built:**
+  - "Paid by…" line under the bill total, with "Change" for the host (`components/PayerLine.tsx`, used in `app/(app)/bills/[id]/index.tsx` and `settle.tsx`).
+  - The "Who paid?" page, `app/(app)/bills/[id]/payers.tsx`: one person or several, a $ / % switch, Save only when the amounts add up exactly (`lib/payersForm.ts`). It replaced the planned sheet (A2.1).
+  - Database: `bill_payers`, `set_payers`, `set_payer(bill, payer)`, the payments ledger `bill_payments` / `bill_payment_flags` (migrations `20261127140000`–`140002`).
+  - Settle up with one card and one Venmo link per person you owe (`ledgerSettlePlan` in `lib/settle.ts`, `settleTransfers` in `lib/transfers.ts`, `settleCards` in `lib/settleView.ts`).
+  - Home groups and pills for split-paid bills (`balanceFor`, `lib/homeSections.ts`), and Activity sentences for `payers_changed`.
+  - Leave / remove refusals for co-payers (`lib/membership.ts`, `private.is_removable`).
+- **How the notes below were decided:** payer can be anyone on the bill (not someone outside it); payments are a ledger and are never cleared when who paid changes; the fewest payments, kept stable by a plan key; settling pauses on a stale split; no early settling on split bills; group bills keep one payer.
+- **Still open:** the user checks U1–U3 (status not checked; `docs/before-production.md` §7), and the decisions waiting for your look in `docs/decisions-to-review.md` ("2026-11-26 · Who paid", WP-51, WP-52, the WP-PAGE rows).
+
+The text below is the original queue entry, kept as written.
+
+**User's request:** "if i scan the receipt i can edit the payer to someone else / we both split the paying of the bill in a certain way (this should be allowed as well - in the bill on who paid you can click edit and update the numbers/ people who paid and distribution there) since this is a rare occurrence we want to expose it nicely but not by default".
+
+**What existed on 2026-11-26:** one payer per bill (`bills.payer_id`, `set_payer`). The host can change it only on the Settle screen (`components/PayerPicker.tsx`, `app/(app)/bills/[id]/settle.tsx`), and only once others have joined (M3 user decision 2026-11-24).
+
+**User decisions so far:**
+- The payer can be changed from the bill itself (including right after scanning), not only on Settle.
+- Several people can share the paying, with amounts (e.g. "I paid $60, Sam paid $40.21"); the amounts are editable.
+- Rare, so it stays out of the way: a quiet "Paid by You · Edit" line, not a step in the default flow.
+
+**Notes for the spec (PM to decide/confirm):**
+- **Data model change (migration):** a `bill_payers (bill_id, user_id, paid_cents)` table, or similar, replacing or alongside `payer_id`. Paid amounts must add up to the bill total exactly (integer cents; same rule in `lib/` and the database).
+- **Settle math:** each person's net = paid − share. Who-pays-whom is worked out from the nets (e.g. fewest payments, largest-remainder rounding kept). Venmo links go to each person the payer owes.
+- **Changing the payer after a scan:** others may not have joined yet. Decide whether the payer can be someone not on the bill yet (probably only "people you've split with" or after they join).
+- **Paid marks:** what happens to existing "I paid" marks when the payers or amounts change (today `set_payer` compares a count; see `docs/before-production.md`).
+- **Home groups:** "Owed to you" / "Waiting on you" should follow each person's net amount, so they keep working with several payers (the groups v2 spec defines them in terms that allow this).
+- Use the `ui-ux-designer` skill: a bottom sheet with "One person paid" (default) / "Split the paying", amounts with a running "$0.00 left to assign" check.

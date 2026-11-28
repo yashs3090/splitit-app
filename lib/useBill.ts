@@ -29,6 +29,8 @@ export type UseBill = {
    * The newest refetch number that has finished, whether it succeeded or failed (0 before any).
    * A failed refetch never advances `version`, so a screen waiting for "the refetch after my write"
    * compares against this to stop waiting (it then shows what `load` still holds).
+   * Only the newest refetch counts: one that a newer refetch superseded is dropped and never
+   * finishes, so `finished >= n` with `version < n` always means a real failure.
    */
   finished: number;
   /** Starts a refetch and returns its number. */
@@ -66,10 +68,23 @@ export function useBill(id: string): UseBill {
     const mine = ++started.current;
     void fetchBill(id).then((res) => {
       if (!mounted.current) return;
-      setFinished((f) => Math.max(f, mine));
+      // Superseded: a newer refetch has started, so this answer is dropped and doesn't count as
+      // finished either. Waiters on it wait for the newer one, which covers their write too.
+      // (Counting it let a dropped refetch look like a failed one: "Couldn't refresh" and no
+      // announcement, while the newer refetch was still on its way.)
       if (mine !== started.current) return;
+      setFinished((f) => Math.max(f, mine));
       if (res.ok) {
-        const data: BillData = { bill: res.bill, rows: res.rows, participants: res.participants, claims: res.claims };
+        const data: BillData = {
+          bill: res.bill,
+          rows: res.rows,
+          participants: res.participants,
+          claims: res.claims,
+          // Who paid (A1.4): the ledger travels with the bill.
+          payers: res.payers,
+          payments: res.payments,
+          flags: res.flags,
+        };
         const before = shownEditedAt.current;
         if (before !== undefined && data.bill.edited_at !== null && data.bill.edited_at !== before) setEdited(true);
         shownEditedAt.current = data.bill.edited_at;

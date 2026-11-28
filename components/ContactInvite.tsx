@@ -13,7 +13,7 @@ import { AccessibilityInfo, Linking, Platform, Pressable, StyleSheet, Text, View
 import { Button } from '@/components/ui/Button';
 import { useFocusRing } from '@/components/ui/useFocusRing';
 import { inviteMessage, phoneChoices, whatsAppUrl, type PhoneChoice } from '@/lib/contactInvite';
-import { CONTACT_COPY, phoneChoiceA11yLabel, phoneLabelText } from '@/lib/contactInviteView';
+import { CONTACT_COPY, contactSendHints, phoneChoiceA11yLabel, phoneLabelText, type ContactInviteKind } from '@/lib/contactInviteView';
 import { pickContactPhones, sendSms, smsAvailable } from '@/lib/contactPicker';
 import { opacity, radius, space, TOUCH_TARGET, type, useTheme } from '@/lib/theme';
 
@@ -27,8 +27,17 @@ type Step =
 
 const IDLE: Step = { kind: 'idle' };
 
-export function ContactInvite({ url }: { url: string }) {
+type Props = {
+  url: string;
+  /** The text sent with the link. Defaults to the bill wording (inviteMessage); the group invite passes its own (GR-28). */
+  message?: (url: string) => string;
+  /** What the link opens, for the Messages / WhatsApp hints. Defaults to 'bill' (review R5). */
+  kind?: ContactInviteKind;
+};
+
+export function ContactInvite({ url, message = inviteMessage, kind = 'bill' }: Props) {
   const { colors } = useTheme();
+  const hints = contactSendHints(kind);
   const [step, setStep] = useState<Step>(IDLE);
   const [notice, setNotice] = useState<string | null>(null);
   /** True from the tap until the flow is back to idle: one picker, one composer at a time. */
@@ -90,7 +99,7 @@ export function ContactInvite({ url }: { url: string }) {
     if (sending.current) return;
     sending.current = true;
     setStep((s) => (s.kind === 'send' ? { ...s, sending: true } : s));
-    const res = await sendSms(number, inviteMessage(url));
+    const res = await sendSms(number, message(url));
     if (!mounted.current) return;
     finish(res === 'error' ? CONTACT_COPY.error : null);
   }
@@ -101,7 +110,7 @@ export function ContactInvite({ url }: { url: string }) {
     setStep((s) => (s.kind === 'send' ? { ...s, sending: true } : s));
     let ok = true;
     try {
-      await Linking.openURL(whatsAppUrl(number, inviteMessage(url)));
+      await Linking.openURL(whatsAppUrl(number, message(url)));
     } catch {
       ok = false;
     }
@@ -154,7 +163,7 @@ export function ContactInvite({ url }: { url: string }) {
               <Button
                 label={CONTACT_COPY.messages}
                 accessibilityLabel={CONTACT_COPY.messages}
-                accessibilityHint={CONTACT_COPY.messagesHint}
+                accessibilityHint={hints.messages}
                 variant="primary"
                 disabled={step.sending}
                 onPress={() => void onMessages(step.number)}
@@ -163,7 +172,7 @@ export function ContactInvite({ url }: { url: string }) {
             <Button
               label={CONTACT_COPY.whatsApp}
               accessibilityLabel={CONTACT_COPY.whatsApp}
-              accessibilityHint={CONTACT_COPY.whatsAppHint}
+              accessibilityHint={hints.whatsApp}
               variant={step.sms ? 'secondary' : 'primary'}
               disabled={step.sending}
               onPress={() => void onWhatsApp(step.number)}

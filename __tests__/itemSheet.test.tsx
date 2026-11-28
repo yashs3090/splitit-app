@@ -7,6 +7,7 @@ import { act, fireEvent, renderRouter, screen, waitFor } from 'expo-router/testi
 import { supabase as realSupabase } from '@/lib/supabase';
 import { fakeSession, type FakeChannel, type FakeResult, type FakeSupabase } from '@/test-utils/fakes';
 
+jest.mock('@/lib/tabBadges', () => jest.requireActual<typeof import('@/test-utils/tabBar')>('@/test-utils/tabBar').quietFeedBadges());
 jest.mock('@/lib/supabase', () => {
   const { createFakeSupabase } = jest.requireActual<typeof import('@/test-utils/fakes')>('@/test-utils/fakes');
   return { supabase: createFakeSupabase() };
@@ -76,6 +77,7 @@ beforeEach(() => {
     total_discount_cents: 0,
     total_cents: 4480,
     join_code: '0123456789abcdef0123',
+    group_id: null, // bills.group_id: fetchBillGroup reads it (a bill in no group)
     created_at: '2026-11-20T19:00:00Z',
     edited_at: null,
     extras_split: 'proportional',
@@ -184,6 +186,17 @@ describe('item sheet', () => {
     expect(screen.queryByText('Save split')).toBeNull();
     expect(screen.queryByText('Reset to even')).toBeNull();
     expect(screen.queryByLabelText(/parts for/)).toBeNull();
+  });
+
+  it('groups 85: a non-group bill has no "Who had this?" chips; the stepper is only for claimers', async () => {
+    db.claims = [claim(FRIES, A), claim(FRIES, C)];
+    await openFries();
+    // The claimers list is there (so the absence below is meaningful).
+    expect(screen.getByLabelText('Hana Lee $3.00')).toBeTruthy();
+    expect(screen.queryByText('Who had this?')).toBeNull();
+    expect(screen.queryByRole('checkbox', { name: /had this$/ })).toBeNull();
+    expect(screen.queryByText('Split differently')).toBeNull();
+    expect(rpcCallsExceptSeen().some(([fn]) => fn === 'assign_item')).toBe(false);
   });
 
   it('87: an unclaimed item says nobody has claimed it', async () => {

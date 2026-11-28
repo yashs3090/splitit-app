@@ -60,6 +60,7 @@ function installTables() {
       total_discount_cents: 0,
       total_cents: 1500,
       join_code: joinCode,
+      group_id: null, // bills.group_id: fetchBillGroup reads it (a bill in no group)
       created_at: '2026-11-20T19:00:00Z',
       edited_at: null,
       extras_split: 'proportional',
@@ -106,22 +107,29 @@ describe.each(['ios', 'web'] as const)('invite QR on the bill screen on %s', (os
     Platform.OS = os;
   });
 
-  it('shows the QR of exactly inviteUrl(join_code), and redraws it after "Make a new link"', async () => {
+  it('the popup shows the QR of exactly inviteUrl(join_code), and the new one after "Make a new link"', async () => {
     const router = renderRouter(ROUTES, { initialUrl: `/bills/${BILL}` });
     await screen.findByText('Total $15.00');
 
     fireEvent.press(screen.getByRole('button', { name: INVITE_QR_COPY.show }));
     expect(qrValue()).toBe(realInviteUrl(CODE));
 
+    // The popup covers the card: close it first, as a person would.
+    fireEvent.press(screen.getByRole('button', { name: INVITE_QR_COPY.done }));
+    expect(screen.UNSAFE_queryAllByType(QRCode)).toHaveLength(0);
+
     // The host makes a new link; the refetch brings the new code.
     joinCode = NEW_CODE;
     installTables();
     fireEvent.press(screen.getByText('Make a new link'));
     await act(async () => fireEvent.press(screen.getByText('Make new link')));
-    await waitFor(() => expect(qrValue()).toBe(realInviteUrl(NEW_CODE)));
-    // Still open, and the link above it matches.
-    expect(screen.getByRole('button', { name: INVITE_QR_COPY.hide })).toBeTruthy();
-    expect(screen.getByLabelText(`Invite link ${realInviteUrl(NEW_CODE)}`)).toBeTruthy();
+    await waitFor(() => expect(screen.getByLabelText(`Invite link ${realInviteUrl(NEW_CODE)}`)).toBeTruthy());
+
+    // Reopened, the popup shows the new link's QR and the new link, never the old one.
+    fireEvent.press(screen.getByRole('button', { name: INVITE_QR_COPY.show }));
+    expect(qrValue()).toBe(realInviteUrl(NEW_CODE));
+    expect(screen.getAllByLabelText(`Invite link ${realInviteUrl(NEW_CODE)}`)).toHaveLength(2);
+    expect(screen.queryAllByLabelText(`Invite link ${realInviteUrl(CODE)}`)).toHaveLength(0);
     router.unmount();
   });
 

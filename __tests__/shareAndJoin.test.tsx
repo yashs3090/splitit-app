@@ -1,14 +1,18 @@
 // Share panel, join, and home list: criteria 91–98 in docs/specs/2026-11-20-m1b-m2-share-and-claim.md
 // (Task 12). The M0 resume flow tests live in inviteFlow.test.tsx; this file adds the web path.
 import * as Clipboard from 'expo-clipboard';
-import { act, fireEvent, renderRouter, screen, waitFor } from 'expo-router/testing-library';
+import { act, fireEvent, renderRouter, screen, waitFor, within } from 'expo-router/testing-library';
 import { Platform, Share } from 'react-native';
 
 import { PENDING_INVITE_KEY } from '@/lib/pendingInvite';
 import { storage as realStorage } from '@/lib/storage';
 import { supabase as realSupabase } from '@/lib/supabase';
+import { SEEN_DEBOUNCE_MS } from '@/lib/useMarkSeen';
 import { fakeSession, type FakeResult, type FakeSupabase, type MemoryStorage } from '@/test-utils/fakes';
 
+// The live tab bar also reads the Activity and Groups badges; quiet those reads so this file's
+// supabase call logs hold only Home's own. The Tabs count stays real.
+jest.mock('@/lib/tabBadges', () => jest.requireActual<typeof import('@/test-utils/tabBar')>('@/test-utils/tabBar').quietFeedBadges());
 jest.mock('@/lib/supabase', () => {
   const { createFakeSupabase } = jest.requireActual<typeof import('@/test-utils/fakes')>('@/test-utils/fakes');
   return { supabase: createFakeSupabase() };
@@ -27,8 +31,9 @@ jest.mock('@/lib/inviteLink', () => ({
 }));
 
 const supabase = realSupabase as unknown as FakeSupabase;
-/** Every rpc call except the bill screen's fire-and-forget mark_bill_seen (bill markers D6), which runs once per open. */
-const rpcCallsExceptSeen = () => supabase.rpc.mock.calls.filter(([fn]) => fn !== 'mark_bill_seen');
+/** Every rpc call except the fire-and-forget mark_bill_seen (sent-via-Venmo F7: per version, debounced, and on blur). */
+// Also not the host's one my_groups read (groups GR-T17-12: "Move to a group"), which writes nothing.
+const rpcCallsExceptSeen = () => supabase.rpc.mock.calls.filter(([fn]) => fn !== 'mark_bill_seen' && fn !== 'my_groups');
 const storage = realStorage as unknown as MemoryStorage;
 
 const BILL = '11111111-1111-4111-8111-111111111111';
@@ -59,6 +64,7 @@ beforeEach(() => {
     total_discount_cents: 0,
     total_cents: 600,
     join_code: CODE,
+    group_id: null, // bills.group_id: fetchBillGroup reads it (a bill in no group)
     created_at: '2026-11-20T19:00:00Z',
     edited_at: null,
     extras_split: 'proportional',
@@ -99,6 +105,7 @@ beforeEach(() => {
   supabase.__setRpc((fn) => {
     if (fn === 'join_bill') return { data: BILL, error: null };
     if (fn === 'my_bills') return db.myBills;
+    if (fn === 'my_groups') return { data: [], error: null }; // Home's Groups block: no groups
     return { data: null, error: null };
   });
   signInAs(B);
@@ -203,7 +210,8 @@ describe('join', () => {
     await waitFor(() => expect(router.getPathname()).toBe(`/bills/${BILL}`));
     expect(await screen.findByText('Total $6.00')).toBeTruthy();
     expect(joins()).toEqual([['join_bill', { p_code: CODE }]]);
-    // R1: /b/<code> → join_bill → replace lands on a ready bill, which marks it seen once.
+    // R1: /b/<code> → join_bill → replace lands on a ready bill, which marks it seen (after the debounce, F7).
+    act(() => jest.advanceTimersByTime(SEEN_DEBOUNCE_MS));
     await waitFor(() =>
       expect(supabase.rpc.mock.calls.filter(([fn]) => fn === 'mark_bill_seen')).toEqual([['mark_bill_seen', { p_bill_id: BILL }]]),
     );
@@ -223,8 +231,9 @@ describe('join', () => {
     await waitFor(() => expect(router.getPathname()).toBe(`/bills/${BILL}`));
     expect(joins()).toEqual([['join_bill', { p_code: CODE }]]);
     expect(storage.data.has(PENDING_INVITE_KEY)).toBe(false);
-    // R1: the web OAuth '/' resume also lands on a ready bill, marked seen once.
+    // R1: the web OAuth '/' resume also lands on a ready bill, marked seen (after the debounce, F7).
     expect(await screen.findByText('Total $6.00')).toBeTruthy();
+    act(() => jest.advanceTimersByTime(SEEN_DEBOUNCE_MS));
     await waitFor(() =>
       expect(supabase.rpc.mock.calls.filter(([fn]) => fn === 'mark_bill_seen')).toEqual([['mark_bill_seen', { p_bill_id: BILL }]]),
     );
@@ -267,24 +276,33 @@ describe('join', () => {
 });
 
 describe('home', () => {
-  it('98: lists "Your bills", and each row opens its bill', async () => {
+  // HOME-SEC-1/2: "Waiting on you" is drawn as Items to claim / Still needs to be paid, each a toggle.
+  const WAITING_SECTION = /^(Items to claim|Still needs to be paid), \d+ bills?$/;
+
+  it('98: lists your bills (here under "Waiting on you"), and each row opens its bill', async () => {
     const router = renderRouter('./app', { initialUrl: '/' });
-    expect(await screen.findByText('Your bills')).toBeTruthy();
-    const row = await screen.findByText(/^Hana Lee's bill · .+ · \$6\.00$/);
+    // Row titles, sections and amounts: docs/specs/2026-11-26-home-mobile-refresh.md D2–D4.
+    const row = await screen.findByText("Hana Lee's bill");
+    expect(screen.getByRole('button', { name: WAITING_SECTION })).toBeTruthy();
+    expect(screen.getByText('$6.00')).toBeTruthy();
     fireEvent.press(row);
     await waitFor(() => expect(router.getPathname()).toBe(`/bills/${BILL}`));
     // Let the bill screen finish loading so no update lands after the test.
     expect(await screen.findByText('Invite friends')).toBeTruthy();
   });
 
-  it('visual pass V9 / P4: Profile is an icon button, no "Signed in as", rows are links with a chevron icon', async () => {
+  it('visual pass V9 / P4 (tab-bar spec Task 5): Profile is a tab, not a Home icon; no "Signed in as"; rows are links with a chevron icon', async () => {
     renderRouter('./app', { initialUrl: '/' });
-    expect(await screen.findByRole('header', { name: 'Your bills' })).toBeTruthy();
-    await screen.findByText(/^Hana Lee's bill · .+ · \$6\.00$/);
+    expect(await screen.findByRole('button', { name: WAITING_SECTION })).toBeTruthy();
+    await screen.findByText("Hana Lee's bill");
     expect(screen.queryByText(/Signed in as/)).toBeNull();
-    const profile = screen.getByRole('button', { name: 'Profile' });
-    expect(profile.props.accessibilityHint).toBe('Your name, Venmo username and sign out');
-    expect(screen.queryByText('Profile')).toBeNull(); // icon only: the label is for screen readers
+    // Home's Profile icon button moved to the tab bar: the only "Profile" control is the tab.
+    expect(screen.queryByRole('button', { name: 'Profile' })).toBeNull();
+    // A tab on native, a link on web (an earlier test in this file leaves Platform.OS as 'web').
+    const profile = screen.getByLabelText('Profile');
+    expect(['tab', 'link']).toContain(profile.props.accessibilityRole);
+    expect(within(profile).getByText('Profile')).toBeTruthy(); // a tab shows its label
+    expect(screen.getAllByText('Profile')).toHaveLength(1);
     expect(screen.getAllByRole('link').length).toBeGreaterThan(0);
     expect(screen.queryByText('›')).toBeNull();
   });
@@ -292,7 +310,8 @@ describe('home', () => {
   it('98: shows "Your bill" for bills you host', async () => {
     signInAs(A);
     renderRouter('./app', { initialUrl: '/' });
-    expect(await screen.findByText(/^Your bill · .+ · \$6\.00$/)).toBeTruthy();
+    expect(await screen.findByText('Your bill')).toBeTruthy();
+    expect(screen.getByText('$6.00')).toBeTruthy();
   });
 
   it('98: an empty list shows "No bills yet."', async () => {

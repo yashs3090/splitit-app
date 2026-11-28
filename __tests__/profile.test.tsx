@@ -1,4 +1,5 @@
 // Profile screen: criteria 27–30 in docs/specs/2026-11-24-profile-venmo.md (Task 4).
+import { router as globalRouter } from 'expo-router';
 import { act, fireEvent, renderRouter, screen, waitFor } from 'expo-router/testing-library';
 import { AccessibilityInfo, Platform } from 'react-native';
 
@@ -276,22 +277,32 @@ describe('Profile screen', () => {
     expect(router.getPathname()).toBe('/profile');
   });
 
-  it('Back returns to home when Profile was opened from home', async () => {
+  it('tab-bar 30: the Profile tab, opened from Home, has no back control', async () => {
     const router = renderRouter(ROUTES, { initialUrl: '/' });
-    const profile = await screen.findByLabelText('Profile');
+    await screen.findByRole('header', { name: 'SplitIt' });
     await act(async () => {
-      fireEvent.press(profile);
+      fireEvent.press(screen.getByRole('tab', { name: 'Profile' }));
     });
     await screen.findByLabelText('Venmo username');
     expect(router.getPathname()).toBe('/profile');
+    expect(screen.queryByLabelText('Back')).toBeNull();
+  });
+
+  it('tab-bar 41: /account (Profile above the tabs) goes Back to home when opened from home', async () => {
+    const router = renderRouter(ROUTES, { initialUrl: '/' });
+    await screen.findByRole('header', { name: 'SplitIt' });
+    act(() => globalRouter.push('/account'));
+    await screen.findByLabelText('Venmo username');
+    expect(router.getPathname()).toBe('/account');
     await act(async () => {
       fireEvent.press(screen.getByLabelText('Back'));
     });
     await waitFor(() => expect(router.getPathname()).toBe('/'));
+    expect(await screen.findByRole('header', { name: 'SplitIt' })).toBeTruthy();
   });
 
-  it('Back from a deep-linked /profile (nothing to go back to) replaces with home', async () => {
-    const router = await openProfile();
+  it('Back from a deep-linked /account goes to home (the tabs are under it)', async () => {
+    const router = await openProfile('/account');
     await act(async () => {
       fireEvent.press(screen.getByLabelText('Back'));
     });
@@ -299,7 +310,7 @@ describe('Profile screen', () => {
   });
 
   it('30: controls have labels and hints; status and errors are announced', async () => {
-    await openProfile();
+    await openProfile('/account');
     expect(screen.getByLabelText('Back').props.accessibilityHint).toBeTruthy();
     expect(saveButton().props.accessibilityHint).toBeTruthy();
     expect(screen.getByLabelText('Sign out').props.accessibilityHint).toBe('Signs you out on this device');
@@ -321,7 +332,7 @@ describe('Profile screen', () => {
   it('30: the file carries the BILL HISTORY (v1) marker and shows no history UI', async () => {
     // The app's tsconfig has no Node types, so load fs with just the one signature used here.
     const fs = jest.requireActual<{ readFileSync(file: string, encoding: 'utf8'): string }>('fs');
-    const source = fs.readFileSync(`${process.cwd()}/app/(app)/profile.tsx`, 'utf8');
+    const source = fs.readFileSync(`${process.cwd()}/components/ProfileScreen.tsx`, 'utf8');
     expect(source).toContain('BILL HISTORY (v1)');
     await openProfile();
     expect(screen.queryByText(/history/i)).toBeNull();

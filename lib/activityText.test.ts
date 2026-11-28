@@ -901,3 +901,542 @@ describe('describeEvent: paid_difference and paid_back (settle early and differe
     expect(describeEvent(event, nameOf)).toBeNull();
   });
 });
+
+// Sent via Venmo, contract V (docs/specs/2026-11-26-sent-via-venmo.md § D6, Task 4). A mark carries
+// how it was paid (`method`); `not_received` is new; `paid_back` gains `method` and `payer_id`. Every
+// row is read by a third person, by the actor ("You") and by the other party ("you"), at $15.10 and
+// at $0.01 (lesson 2026-11-24 "Sentence templates broke at a count of 1 and when the name was You").
+describe('describeEvent: payment methods and not_received (sent via Venmo D6)', () => {
+  const GONE = 'bbbbbbbb-0000-4000-8000-0000000000ff'; // not on the bill any more: nameOf says "Someone"
+  const marked = (method: unknown, cents = 1510, actor: string | null = SAM) =>
+    ev('marked_paid', actor, method === undefined ? { payer_id: HANA, cents } : { payer_id: HANA, cents, method });
+  const more = (method: unknown, from = 1510, to = 1620) =>
+    ev('paid_difference', SAM, method === undefined ? { payer_id: HANA, from, to } : { payer_id: HANA, from, to, method });
+  const notReceived = (d: Record<string, unknown>, actor: string | null = HANA) => ev('not_received', actor, d);
+  const nr = (cents = 1510, method = 'venmo') => notReceived({ user_id: SAM, payer_id: HANA, cents, method });
+
+  // [label, event, third person, actor = viewer, other party = viewer]
+  it.each<[string, ActivityEvent, string, string, string]>([
+    [
+      'marked_paid, venmo',
+      marked('venmo'),
+      'Sam sent Hana $15.10 via Venmo',
+      'You sent Hana $15.10 via Venmo',
+      'Sam sent you $15.10 via Venmo',
+    ],
+    [
+      'marked_paid, venmo, 1 cent',
+      marked('venmo', 1),
+      'Sam sent Hana $0.01 via Venmo',
+      'You sent Hana $0.01 via Venmo',
+      'Sam sent you $0.01 via Venmo',
+    ],
+    [
+      'marked_paid, cash',
+      marked('cash'),
+      'Sam paid Hana $15.10 in cash',
+      'You paid Hana $15.10 in cash',
+      'Sam paid you $15.10 in cash',
+    ],
+    [
+      'marked_paid, cash, 1 cent',
+      marked('cash', 1),
+      'Sam paid Hana $0.01 in cash',
+      'You paid Hana $0.01 in cash',
+      'Sam paid you $0.01 in cash',
+    ],
+    [
+      'marked_paid, other (unchanged)',
+      marked('other'),
+      'Sam marked that they paid Hana $15.10',
+      'You marked that you paid Hana $15.10',
+      'Sam marked that they paid you $15.10',
+    ],
+    [
+      'marked_paid, other, 1 cent (unchanged)',
+      marked('other', 1),
+      'Sam marked that they paid Hana $0.01',
+      'You marked that you paid Hana $0.01',
+      'Sam marked that they paid you $0.01',
+    ],
+    [
+      'marked_paid, no method (an event from before this slice)',
+      marked(undefined),
+      'Sam marked that they paid Hana $15.10',
+      'You marked that you paid Hana $15.10',
+      'Sam marked that they paid you $15.10',
+    ],
+    [
+      'paid_difference, venmo',
+      more('venmo'),
+      'Sam sent Hana $1.10 more via Venmo',
+      'You sent Hana $1.10 more via Venmo',
+      'Sam sent you $1.10 more via Venmo',
+    ],
+    [
+      'paid_difference, venmo, 1 cent',
+      more('venmo', 1510, 1511),
+      'Sam sent Hana $0.01 more via Venmo',
+      'You sent Hana $0.01 more via Venmo',
+      'Sam sent you $0.01 more via Venmo',
+    ],
+    [
+      'paid_difference, cash',
+      more('cash'),
+      'Sam paid Hana $1.10 more in cash',
+      'You paid Hana $1.10 more in cash',
+      'Sam paid you $1.10 more in cash',
+    ],
+    [
+      'paid_difference, cash, 1 cent',
+      more('cash', 1, 2),
+      'Sam paid Hana $0.01 more in cash',
+      'You paid Hana $0.01 more in cash',
+      'Sam paid you $0.01 more in cash',
+    ],
+    ['paid_difference, other (unchanged)', more('other'), 'Sam paid Hana $1.10 more', 'You paid Hana $1.10 more', 'Sam paid you $1.10 more'],
+    ['paid_difference, no method (unchanged)', more(undefined), 'Sam paid Hana $1.10 more', 'You paid Hana $1.10 more', 'Sam paid you $1.10 more'],
+  ])('%s', (_label, event, third, asActor, asOther) => {
+    expect(describeEvent(event, nameOf)).toBe(third);
+    expect(describeEvent(event, asViewer(PAT))).toBe(third);
+    expect(describeEvent(event, asViewer(SAM))).toBe(asActor);
+    expect(describeEvent(event, asViewer(HANA))).toBe(asOther);
+  });
+
+  // not_received: the actor is the payer (Hana), the other party is the person whose mark was cleared (Sam).
+  it.each<[string, ActivityEvent, string, string, string]>([
+    [
+      'not_received, venmo',
+      nr(1510, 'venmo'),
+      "Hana hasn't received Sam's $15.10",
+      "You marked Sam's $15.10 as not received",
+      "Hana hasn't received your $15.10",
+    ],
+    [
+      'not_received, 1 cent',
+      nr(1, 'venmo'),
+      "Hana hasn't received Sam's $0.01",
+      "You marked Sam's $0.01 as not received",
+      "Hana hasn't received your $0.01",
+    ],
+    ['not_received, cash', nr(1510, 'cash'), "Hana hasn't received Sam's $15.10", "You marked Sam's $15.10 as not received", "Hana hasn't received your $15.10"],
+    ['not_received, other', nr(1510, 'other'), "Hana hasn't received Sam's $15.10", "You marked Sam's $15.10 as not received", "Hana hasn't received your $15.10"],
+    [
+      'not_received, the C2 maximum',
+      nr(99_999_999, 'cash'),
+      "Hana hasn't received Sam's $999,999.99",
+      "You marked Sam's $999,999.99 as not received",
+      "Hana hasn't received your $999,999.99",
+    ],
+  ])('%s', (_label, event, third, asActor, asOther) => {
+    expect(describeEvent(event, nameOf)).toBe(third);
+    expect(describeEvent(event, asViewer(PAT))).toBe(third);
+    expect(describeEvent(event, asViewer(HANA))).toBe(asActor);
+    expect(describeEvent(event, asViewer(SAM))).toBe(asOther);
+  });
+
+  it('not_received about someone no longer on the bill, by a payer whose account went (null actor)', () => {
+    expect(describeEvent(notReceived({ user_id: GONE, payer_id: HANA, cents: 1510, method: 'venmo' }), nameOf)).toBe(
+      "Hana hasn't received someone's $15.10",
+    );
+    expect(describeEvent(notReceived({ user_id: SAM, payer_id: HANA, cents: 1510, method: 'venmo' }, null), nameOf)).toBe(
+      "Hana hasn't received Sam's $15.10",
+    );
+    expect(describeEvent(notReceived({ user_id: SAM, payer_id: GONE, cents: 1510, method: 'venmo' }, null), asViewer(SAM))).toBe(
+      "Someone hasn't received your $15.10",
+    );
+  });
+
+  it('a payer or person with no display name, or no longer on the bill, reads in lower case mid-sentence', () => {
+    const noName: NameOf = (id) => (id === HANA ? 'A friend' : nameOf(id));
+    expect(describeEvent(marked('venmo'), noName)).toBe('Sam sent a friend $15.10 via Venmo');
+    expect(describeEvent(more('cash'), noName)).toBe('Sam paid a friend $1.10 more in cash');
+    const gonePayer = ev('marked_paid', SAM, { payer_id: GONE, cents: 1510, method: 'cash' });
+    expect(describeEvent(gonePayer, nameOf)).toBe('Sam paid someone $15.10 in cash');
+  });
+
+  it('paid_back with the new method and payer_id reads as before, for every method', () => {
+    for (const method of ['venmo', 'cash', 'other']) {
+      const e = ev('paid_back', HANA, { user_id: SAM, payer_id: HANA, from: 1510, to: 1400, method });
+      expect(describeEvent(e, nameOf)).toBe('Hana paid Sam back $1.10');
+      expect(describeEvent(e, asViewer(HANA))).toBe('You paid Sam back $1.10');
+      expect(describeEvent(e, asViewer(SAM))).toBe('Hana paid you back $1.10');
+    }
+    const toZero = ev('paid_back', HANA, { user_id: SAM, payer_id: HANA, from: 1, to: 0, method: 'venmo' });
+    expect(describeEvent(toZero, asViewer(SAM))).toBe('Hana paid you back $0.01');
+  });
+
+  it('never shows ids, the method word or anything else from details', () => {
+    const out = describeEvent(nr(1510, 'venmo'), nameOf);
+    expect(out).toBe("Hana hasn't received Sam's $15.10");
+    expect(out).not.toContain(SAM);
+    expect(out).not.toContain(HANA);
+    expect(out).not.toMatch(/venmo/i);
+    const withNote = ev('marked_paid', SAM, { payer_id: HANA, cents: 1510, method: 'venmo', note: 'Dinner <b>' });
+    expect(describeEvent(withNote, nameOf)).toBe('Sam sent Hana $15.10 via Venmo');
+  });
+
+  it.each<[string, ActivityEvent]>([
+    // An unknown method is malformed, whatever the kind (D6: "Unknown method … → null").
+    ['marked_paid with method zelle', marked('zelle')],
+    ['marked_paid with method Venmo (wrong case)', marked('Venmo')],
+    ['marked_paid with method null', marked(null)],
+    ['marked_paid with a numeric method', marked(1)],
+    ['marked_paid with an empty method', marked('')],
+    ['marked_paid, venmo, 0 cents', marked('venmo', 0)],
+    ['marked_paid, cash, fractional cents', marked('cash', 15.1)],
+    ['paid_difference with method zelle', more('zelle')],
+    ['paid_difference with method null', more(null)],
+    ['paid_difference, venmo, wrong direction', more('venmo', 1620, 1510)],
+    ['paid_back with method zelle', ev('paid_back', HANA, { user_id: SAM, payer_id: HANA, from: 1510, to: 1400, method: 'zelle' })],
+    ['paid_back with method null', ev('paid_back', HANA, { user_id: SAM, payer_id: HANA, from: 1510, to: 1400, method: null })],
+    ['paid_back with a non-uuid payer_id', ev('paid_back', HANA, { user_id: SAM, payer_id: 'hana', from: 1510, to: 1400, method: 'cash' })],
+    ['paid_back with payer_id null', ev('paid_back', HANA, { user_id: SAM, payer_id: null, from: 1510, to: 1400 })],
+    ['paid_back with payer_id = user_id', ev('paid_back', HANA, { user_id: SAM, payer_id: SAM, from: 1510, to: 1400 })],
+    ['paid_back by someone other than the payer it names', ev('paid_back', PAT, { user_id: SAM, payer_id: HANA, from: 1510, to: 1400 })],
+    // not_received
+    ['not_received without user_id', notReceived({ payer_id: HANA, cents: 1510, method: 'venmo' })],
+    ['not_received with a non-uuid user_id', notReceived({ user_id: 'sam', payer_id: HANA, cents: 1510, method: 'venmo' })],
+    ['not_received without payer_id', notReceived({ user_id: SAM, cents: 1510, method: 'venmo' })],
+    ['not_received with a non-uuid payer_id', notReceived({ user_id: SAM, payer_id: 7, cents: 1510, method: 'venmo' })],
+    ['not_received about the payer themself', notReceived({ user_id: HANA, payer_id: HANA, cents: 1510, method: 'venmo' })],
+    ['not_received by someone other than the payer', notReceived({ user_id: SAM, payer_id: HANA, cents: 1510, method: 'venmo' }, PAT)],
+    ['not_received without cents', notReceived({ user_id: SAM, payer_id: HANA, method: 'venmo' })],
+    ['not_received with 0 cents', notReceived({ user_id: SAM, payer_id: HANA, cents: 0, method: 'venmo' })],
+    ['not_received with fractional cents', notReceived({ user_id: SAM, payer_id: HANA, cents: 15.1, method: 'venmo' })],
+    ['not_received with string cents', notReceived({ user_id: SAM, payer_id: HANA, cents: '1510', method: 'venmo' })],
+    ['not_received with cents above C2', notReceived({ user_id: SAM, payer_id: HANA, cents: 100_000_000, method: 'venmo' })],
+    ['not_received without method (always written)', notReceived({ user_id: SAM, payer_id: HANA, cents: 1510 })],
+    ['not_received with method zelle', notReceived({ user_id: SAM, payer_id: HANA, cents: 1510, method: 'zelle' })],
+    ['not_received with details not an object', ev('not_received', HANA, [SAM, HANA, 1510])],
+  ])('returns null for malformed details: %s', (_label, event) => {
+    expect(describeEvent(event, nameOf)).toBeNull();
+  });
+});
+
+// Groups MVP T11 (spec docs/specs/2026-11-26-groups-mvp.md, criterion 57): assigning items on a
+// group bill (C-G12: `assigned` / `unassigned` { user_id }, about someone other than the actor) and a
+// bill moving into or out of a group (T5: `moved_to_group` { group_id, converted },
+// `removed_from_group` { group_id }). The group's name comes from the screen through `groupNameOf`.
+describe('describeEvent: group bills (assigned, unassigned, moved_to_group, removed_from_group)', () => {
+  const ANA = 'cccccccc-0000-4000-8000-000000000001';
+  const BEN = 'cccccccc-0000-4000-8000-000000000002';
+  const GONE = 'cccccccc-0000-4000-8000-0000000000ff';
+  const TAHOE = 'dddddddd-0000-4000-8000-000000000001';
+  const OTHER_GROUP = 'dddddddd-0000-4000-8000-000000000002';
+  const GROUP_NAMES: Record<string, string> = { [TAHOE]: 'Tahoe trip' };
+  const groupNameOf = (id: string) => GROUP_NAMES[id] ?? null;
+  const people: Record<string, string> = { [ANA]: 'Ana', [BEN]: 'Ben' };
+  const names: NameOf = (id) => (id === null ? 'Someone' : (people[id] ?? 'Someone'));
+  const viewer =
+    (who: string): NameOf =>
+    (id) =>
+      id === who ? 'You' : names(id);
+
+  it.each<[string, ActivityEvent, NameOf, string]>([
+    ['assigned', ev('assigned', ANA, { user_id: BEN }, 'Tacos'), names, 'Ana assigned Tacos to Ben'],
+    ['assigned, to the viewer', ev('assigned', ANA, { user_id: BEN }, 'Tacos'), viewer(BEN), 'Ana assigned Tacos to you'],
+    ['assigned, by the viewer', ev('assigned', ANA, { user_id: BEN }, 'Tacos'), viewer(ANA), 'You assigned Tacos to Ben'],
+    ['assigned, by a deleted account', ev('assigned', null, { user_id: BEN }, 'Tacos'), names, 'Someone assigned Tacos to Ben'],
+    ['assigned, by someone gone', ev('assigned', GONE, { user_id: BEN }, 'Tacos'), names, 'Someone assigned Tacos to Ben'],
+    ['assigned, to someone gone', ev('assigned', ANA, { user_id: GONE }, 'Tacos'), names, 'Ana assigned Tacos to someone'],
+    ['assigned, a unit', ev('assigned', ANA, { user_id: BEN, unit: [1, 3] }, 'Beer'), names, 'Ana assigned Beer (2 of 3) to Ben'],
+    ['unassigned', ev('unassigned', ANA, { user_id: BEN }, 'Tacos'), names, 'Ana removed Ben from Tacos'],
+    ['unassigned, the viewer', ev('unassigned', ANA, { user_id: BEN }, 'Tacos'), viewer(BEN), 'Ana removed you from Tacos'],
+    ['unassigned, by the viewer', ev('unassigned', ANA, { user_id: BEN }, 'Tacos'), viewer(ANA), 'You removed Ben from Tacos'],
+    ['unassigned, by a deleted account', ev('unassigned', null, { user_id: BEN }, 'Tacos'), names, 'Someone removed Ben from Tacos'],
+    ['unassigned, a unit', ev('unassigned', ANA, { user_id: BEN, unit: [0, 2] }, 'Beer'), names, 'Ana removed Ben from Beer (1 of 2)'],
+  ])('%s', (_label, event, nameOf, expected) => {
+    expect(describeEvent(event, nameOf)).toBe(expected);
+  });
+
+  it.each<[string, ActivityEvent, NameOf, string]>([
+    [
+      'moved in, no marks',
+      ev('moved_to_group', ANA, { group_id: TAHOE, converted: 0 }),
+      names,
+      'Ana moved this bill into Tahoe trip',
+    ],
+    [
+      'moved in, by the viewer',
+      ev('moved_to_group', ANA, { group_id: TAHOE, converted: 0 }),
+      viewer(ANA),
+      'You moved this bill into Tahoe trip',
+    ],
+    [
+      'moved in, 1 mark converted',
+      ev('moved_to_group', ANA, { group_id: TAHOE, converted: 1 }),
+      names,
+      "Ana moved this bill into Tahoe trip. 1 'I paid' mark became a group payment.",
+    ],
+    [
+      'moved in, 2 marks converted',
+      ev('moved_to_group', ANA, { group_id: TAHOE, converted: 2 }),
+      names,
+      "Ana moved this bill into Tahoe trip. 2 'I paid' marks became group payments.",
+    ],
+    [
+      'moved in, unknown group',
+      ev('moved_to_group', ANA, { group_id: OTHER_GROUP, converted: 0 }),
+      names,
+      'Ana moved this bill into a group',
+    ],
+    [
+      'moved in, by a deleted account',
+      ev('moved_to_group', null, { group_id: TAHOE, converted: 0 }),
+      names,
+      'Someone moved this bill into Tahoe trip',
+    ],
+    [
+      'taken out',
+      ev('removed_from_group', ANA, { group_id: TAHOE }),
+      names,
+      'Ana took this bill out of Tahoe trip',
+    ],
+    [
+      'taken out, by the viewer',
+      ev('removed_from_group', ANA, { group_id: TAHOE }),
+      viewer(ANA),
+      'You took this bill out of Tahoe trip',
+    ],
+    [
+      'taken out, unknown group',
+      ev('removed_from_group', ANA, { group_id: OTHER_GROUP }),
+      names,
+      'Ana took this bill out of a group',
+    ],
+  ])('%s', (_label, event, nameOf, expected) => {
+    expect(describeEvent(event, nameOf, groupNameOf)).toBe(expected);
+  });
+
+  it('without groupNameOf the group reads "a group"', () => {
+    expect(describeEvent(ev('moved_to_group', ANA, { group_id: TAHOE, converted: 0 }), names)).toBe(
+      'Ana moved this bill into a group',
+    );
+    expect(describeEvent(ev('removed_from_group', ANA, { group_id: TAHOE }), names)).toBe(
+      'Ana took this bill out of a group',
+    );
+  });
+
+  it('a blank, non-string or throwing group name reads "a group"; the name is trimmed and control characters dropped', () => {
+    const e = ev('moved_to_group', ANA, { group_id: TAHOE, converted: 0 });
+    expect(describeEvent(e, names, () => '   ')).toBe('Ana moved this bill into a group');
+    expect(describeEvent(e, names, () => 7 as unknown as string)).toBe('Ana moved this bill into a group');
+    expect(
+      describeEvent(e, names, () => {
+        throw new Error('boom');
+      }),
+    ).toBe('Ana moved this bill into a group');
+    expect(describeEvent(e, names, () => '  Tahoe\ntrip\u0007 ')).toBe('Ana moved this bill into Tahoe trip');
+  });
+
+  it('R4: a ZWJ emoji in the group name stays whole; a lone surrogate is dropped', () => {
+    const e = ev('moved_to_group', ANA, { group_id: TAHOE, converted: 0 });
+    expect(describeEvent(e, names, () => 'Tahoe 👨‍👩‍👧')).toBe('Ana moved this bill into Tahoe 👨‍👩‍👧');
+    expect(describeEvent(e, names, () => 'Tahoe\ud800 trip')).toBe('Ana moved this bill into Tahoe trip');
+  });
+
+  it('never shows text from details (only names from nameOf and groupNameOf)', () => {
+    const e = ev('moved_to_group', ANA, { group_id: TAHOE, converted: 0, name: 'Evil <b>' });
+    expect(describeEvent(e, names, groupNameOf)).toBe('Ana moved this bill into Tahoe trip');
+    const a = ev('assigned', ANA, { user_id: BEN, parts: 3, note: 'Evil' }, 'Tacos');
+    expect(describeEvent(a, names)).toBe('Ana assigned Tacos to Ben');
+  });
+
+  it.each<[string, unknown]>([
+    ['missing user_id', {}],
+    ['null user_id', { user_id: null }],
+    ['a non-uuid user_id', { user_id: 'ben' }],
+    ['a bad unit', { user_id: BEN, unit: [3, 2] }],
+    ['details that are not an object', [BEN]],
+  ])('assigned / unassigned with %s → null', (_label, details) => {
+    expect(describeEvent(ev('assigned', ANA, details, 'Tacos'), names)).toBeNull();
+    expect(describeEvent(ev('unassigned', ANA, details, 'Tacos'), names)).toBeNull();
+  });
+
+  it('assigned / unassigned with no item name → null', () => {
+    expect(describeEvent(ev('assigned', ANA, { user_id: BEN }, null), names)).toBeNull();
+    expect(describeEvent(ev('unassigned', ANA, { user_id: BEN }, '  '), names)).toBeNull();
+  });
+
+  it('assigned / unassigned about the actor themself → null (assign_item logs claimed / unclaimed for the caller)', () => {
+    expect(describeEvent(ev('assigned', BEN, { user_id: BEN }, 'Tacos'), names)).toBeNull();
+    expect(describeEvent(ev('unassigned', BEN, { user_id: BEN }, 'Tacos'), names)).toBeNull();
+  });
+
+  it.each<[string, unknown]>([
+    ['missing group_id', { converted: 0 }],
+    ['a non-uuid group_id', { group_id: 'tahoe', converted: 0 }],
+    ['missing converted', { group_id: TAHOE }],
+    ['negative converted', { group_id: TAHOE, converted: -1 }],
+    ['fractional converted', { group_id: TAHOE, converted: 1.5 }],
+    ['string converted', { group_id: TAHOE, converted: '2' }],
+  ])('moved_to_group with %s → null', (_label, details) => {
+    expect(describeEvent(ev('moved_to_group', ANA, details), names, groupNameOf)).toBeNull();
+  });
+
+  it.each<[string, unknown]>([
+    ['missing group_id', {}],
+    ['a non-uuid group_id', { group_id: 7 }],
+    ['details that are not an object', null],
+  ])('removed_from_group with %s → null', (_label, details) => {
+    expect(describeEvent(ev('removed_from_group', ANA, details), names, groupNameOf)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Who paid (docs/specs/2026-11-26-who-paid.md, A1.3 event shape, A1.5 Activity copy, D9; Task 8,
+// criterion A-30). `payers_changed { before, after, moved, lost? }`: before / after are
+// [{user_id, cents}] (lead first), moved is contract M's [{from_user, to_user, cents}].
+
+describe('describeEvent: payers_changed (criterion A-30)', () => {
+  const one = (id: string, cents = 10021) => [{ user_id: id, cents }];
+  const split = (a: string, ac: number, b: string, bc: number) => [
+    { user_id: a, cents: ac },
+    { user_id: b, cents: bc },
+  ];
+  const mv = (from: string, to: string, cents: number) => ({ from_user: from, to_user: to, cents });
+  const pc = (actor: string | null, details: unknown) => ev('payers_changed', actor, details);
+
+  it.each<[string, ActivityEvent, NameOf, string]>([
+    // One person → one person (M1 shape), 0, 1 and 2 moved.
+    ['one → one, nothing moved', pc(HANA, { before: one(SAM), after: one(ALEX), moved: [] }), nameOf, 'Hana changed who paid to Alex'],
+    [
+      'one → one, 1 moved (A1.5 copy)',
+      pc(HANA, { before: one(SAM), after: one(ALEX), moved: [mv(PAT, SAM, 900)] }),
+      nameOf,
+      "Hana changed who paid to Alex. Pat's $9.00 to Sam is passed on to Alex.",
+    ],
+    [
+      'one → one, 2 moved to the same person',
+      pc(HANA, { before: one(SAM), after: one(ALEX), moved: [mv(ALI, SAM, 1200), mv(PAT, SAM, 900)] }),
+      nameOf,
+      'Hana changed who paid to Alex. 2 payments to Sam are passed on.',
+    ],
+    // Split → split (M3 shape) and the amounts-only change (M2: nothing moved, still logged).
+    [
+      'split → split, amounts only',
+      pc(HANA, { before: split(HANA, 5000, SAM, 5021), after: split(HANA, 6000, SAM, 4021), moved: [] }),
+      nameOf,
+      'Hana changed who paid: Hana $60.00, Sam $40.21',
+    ],
+    [
+      'split → split, 1 moved: passed on with no single onward person',
+      pc(HANA, { before: split(HANA, 6000, SAM, 4021), after: split(HANA, 6000, ALEX, 4021), moved: [mv(PAT, SAM, 900)] }),
+      nameOf,
+      "Hana changed who paid: Hana $60.00, Alex $40.21. Pat's $9.00 to Sam is passed on.",
+    ],
+    [
+      'split → split, 2 moved to two old payers',
+      pc(HANA, {
+        before: split(SAM, 6000, ALEX, 4021),
+        after: split(HANA, 6000, ALI, 4021),
+        moved: [mv(PAT, ALEX, 300), mv(PAT, SAM, 900)],
+      }),
+      nameOf,
+      'Hana changed who paid: Hana $60.00, Ali $40.21. 2 payments to Alex and Sam are passed on.',
+    ],
+    // One → split (M6) and split → one (M4).
+    ['one → split', pc(HANA, { before: one(HANA), after: split(HANA, 6000, SAM, 4021), moved: [] }), nameOf, 'Hana changed who paid: Hana $60.00, Sam $40.21'],
+    [
+      'split → one person (back to one)',
+      pc(HANA, { before: split(HANA, 6000, PAT, 4021), after: one(SAM), moved: [mv(ALI, PAT, 900)] }),
+      nameOf,
+      "Hana changed who paid to Sam. Ali's $9.00 to Pat is passed on to Sam.",
+    ],
+    // The viewer as each name the sentence takes (lesson 2026-11-24 "Sentence templates…").
+    [
+      'You as actor, split',
+      pc(HANA, { before: one(HANA), after: split(HANA, 6000, SAM, 4021), moved: [] }),
+      asViewer(HANA),
+      'You changed who paid: You $60.00, Sam $40.21',
+    ],
+    ['You as actor, one person', pc(HANA, { before: one(SAM), after: one(PAT), moved: [] }), asViewer(HANA), 'You changed who paid to Pat'],
+    ['You as actor and new payer', pc(HANA, { before: one(SAM), after: one(HANA), moved: [] }), asViewer(HANA), 'You changed who paid to yourself'],
+    ['someone else as actor and new payer', pc(HANA, { before: one(SAM), after: one(HANA), moved: [] }), nameOf, 'Hana changed who paid to themselves'],
+    ['You as the new payer', pc(HANA, { before: one(SAM), after: one(PAT), moved: [mv(ALI, SAM, 900)] }), asViewer(PAT), "Hana changed who paid to you. Ali's $9.00 to Sam is passed on to you."],
+    ['You as the sender', pc(HANA, { before: one(SAM), after: one(PAT), moved: [mv(ALI, SAM, 900)] }), asViewer(ALI), 'Hana changed who paid to Pat. Your $9.00 to Sam is passed on to Pat.'],
+    ['You as the holder', pc(HANA, { before: one(SAM), after: one(PAT), moved: [mv(ALI, SAM, 900)] }), asViewer(SAM), "Hana changed who paid to Pat. Ali's $9.00 to you is passed on to Pat."],
+    [
+      'You as the holder of 2',
+      pc(HANA, { before: one(SAM), after: one(PAT), moved: [mv(ALI, SAM, 900), mv(ALEX, SAM, 100)] }),
+      asViewer(SAM),
+      'Hana changed who paid to Pat. 2 payments to you are passed on.',
+    ],
+    // Actor null: an account deletion (the reset trigger), with `lost`.
+    ['actor null, nothing lost', pc(null, { before: split(HANA, 6000, SAM, 4021), after: one(HANA), moved: [], lost: 0 }), nameOf, 'Who paid went back to Hana'],
+    [
+      'actor null, 1 lost',
+      pc(null, { before: split(HANA, 6000, SAM, 4021), after: one(HANA), moved: [], lost: 1 }),
+      nameOf,
+      'Who paid went back to Hana. 1 payment with a deleted account was removed.',
+    ],
+    [
+      'actor null, 2 lost',
+      pc(null, { before: split(HANA, 6000, SAM, 4021), after: one(HANA), moved: [], lost: 2 }),
+      nameOf,
+      'Who paid went back to Hana. 2 payments with a deleted account were removed.',
+    ],
+    [
+      'actor null, a moved payment and lost (the host was not a payer)',
+      pc(null, { before: split(SAM, 6000, ALEX, 4021), after: one(HANA), moved: [mv(PAT, ALEX, 900)], lost: 1 }),
+      nameOf,
+      "Who paid went back to Hana. Pat's $9.00 to Alex is passed on to Hana. 1 payment with a deleted account was removed.",
+    ],
+    ['actor null, viewer is the host', pc(null, { before: split(HANA, 6000, SAM, 4021), after: one(HANA), moved: [] }), asViewer(HANA), 'Who paid went back to you'],
+    ['lost without an actor key present (absent lost)', pc(null, { before: split(HANA, 6000, SAM, 4021), after: one(HANA), moved: [] }), nameOf, 'Who paid went back to Hana'],
+  ])('%s', (_label, e, names, expected) => {
+    expect(describeEvent(e, names)).toBe(expected);
+  });
+
+  it('a count of 1 never reads "1 payments"', () => {
+    const s = describeEvent(pc(HANA, { before: one(SAM), after: one(PAT), moved: [mv(ALI, SAM, 900)] }), nameOf) ?? '';
+    expect(s).not.toMatch(/\b1 payments\b/);
+    const lost = describeEvent(pc(null, { before: one(SAM), after: one(HANA), moved: [], lost: 1 }), nameOf) ?? '';
+    expect(lost).toContain('1 payment with');
+    expect(lost).not.toMatch(/\b1 payments\b/);
+  });
+
+  it.each<[string, unknown, string | null]>([
+    ['details not an object', null, HANA],
+    ['before missing', { after: one(SAM), moved: [] }, HANA],
+    ['after missing', { before: one(SAM), moved: [] }, HANA],
+    ['moved missing', { before: one(SAM), after: one(PAT) }, HANA],
+    ['after empty', { before: one(SAM), after: [], moved: [] }, HANA],
+    ['before empty', { before: [], after: one(PAT), moved: [] }, HANA],
+    ['a payer id that is not a uuid', { before: one(SAM), after: [{ user_id: 'sam', cents: 100 }], moved: [] }, HANA],
+    ['payer cents not an integer', { before: one(SAM), after: [{ user_id: PAT, cents: 10.5 }], moved: [] }, HANA],
+    ['payer cents negative', { before: one(SAM), after: [{ user_id: PAT, cents: -1 }], moved: [] }, HANA],
+    ['payer cents a string', { before: one(SAM), after: [{ user_id: PAT, cents: '100' }], moved: [] }, HANA],
+    ['a duplicate payer in after', { before: one(SAM), after: [{ user_id: PAT, cents: 1 }, { user_id: PAT, cents: 2 }], moved: [] }, HANA],
+    ['moved not an array', { before: one(SAM), after: one(PAT), moved: {} }, HANA],
+    ['moved cents 0', { before: one(SAM), after: one(PAT), moved: [mv(ALI, SAM, 0)] }, HANA],
+    ['moved cents fractional', { before: one(SAM), after: one(PAT), moved: [mv(ALI, SAM, 1.5)] }, HANA],
+    ['moved from = to', { before: one(SAM), after: one(PAT), moved: [mv(SAM, SAM, 100)] }, HANA],
+    ['moved to someone who is still a payer', { before: one(SAM), after: one(SAM), moved: [mv(ALI, SAM, 100)] }, HANA],
+    ['moved to someone who was never a payer (M8)', { before: one(SAM), after: one(PAT), moved: [mv(ALI, ALEX, 100)] }, HANA],
+    ['moved from a non-uuid', { before: one(SAM), after: one(PAT), moved: [mv('ali', SAM, 100)] }, HANA],
+    ['lost negative', { before: one(SAM), after: one(HANA), moved: [], lost: -1 }, null],
+    ['lost a string', { before: one(SAM), after: one(HANA), moved: [], lost: '2' }, null],
+    ['actor null with a split after (the trigger always goes back to one person)', { before: one(SAM), after: split(HANA, 1, SAM, 2), moved: [] }, null],
+  ])('%s → null', (_label, details, actor) => {
+    expect(describeEvent(pc(actor, details), nameOf)).toBeNull();
+  });
+
+  it('only names and amounts reach the text (a name-shaped field is never shown)', () => {
+    const s = describeEvent(
+      pc(HANA, { before: [{ user_id: SAM, cents: 100, name: 'EVIL' }], after: one(PAT), moved: [{ ...mv(ALI, SAM, 900), note: 'EVIL' }] }),
+      nameOf,
+    );
+    expect(s).toBe("Hana changed who paid to Pat. Ali's $9.00 to Sam is passed on to Pat.");
+  });
+
+  it('old payer_changed events keep their sentences', () => {
+    expect(describeEvent(ev('payer_changed', HANA, { before: HANA, after: SAM, cleared: 1 }), nameOf)).toBe(
+      "Hana changed who gets paid to Sam and cleared 1 'I paid' mark",
+    );
+    expect(describeEvent(ev('payer_changed', null, { before: SAM, after: HANA, cleared: 0 }), nameOf)).toBe(
+      'Who gets paid changed back to Hana (an account was deleted)',
+    );
+  });
+});

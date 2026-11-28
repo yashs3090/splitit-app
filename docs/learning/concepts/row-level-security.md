@@ -50,6 +50,11 @@ What this means in SplitIt today:
   - **Raising your own mark with `settle_difference`** (2026-11-25, [ADR 0021](../decisions/0021-settling-early-and-paying-differences.md)): you can record "I paid more", up to $999,999.99, whatever your share is. The same honor system as the first mark. Activity logs it.
   - **Lowering other people's marks, as the payer** (2026-11-25, ADR 0021): the payer can record "I paid you back" on anyone's mark, down to clearing it. This one *does* touch another person's row, which is why it's worth spelling out. It's accepted because it's strictly weaker than `unmark_paid`, which the payer already has (Undo clears a mark in one step), it's the payer's own statement about money the payer sent, it's logged in Activity with the payer as the actor, and the person sees the change on their Settle card.
   - **Replaying an old `settle_difference` call** (2026-11-25, review R8): the token compares amounts, so if a mark goes away and back to the same amount, an old call can match again and record a second step. Only a direct caller can do this; the app builds each call from fresh data. Fix later with a version number ([stale-state checks](stale-state-checks.md)).
+  - **Choosing any payment method for your own mark** (2026-11-27, [ADR 0024](../decisions/0024-sent-via-venmo-and-payment-methods.md)): a direct caller can mark "Sent via Venmo" without opening Venmo, or "Paid in cash" for a Venmo payment. Methods are self-reported, like the mark. The database only checks that the method is one of `venmo`, `cash`, `other` (`private.is_payment_method`), and nobody can set a method on someone else's row. The app writes `venmo` only from the Pay tap and from "Yes, I sent it".
+  - **"Not received" on someone else's mark, as the payer** (2026-11-27, ADR 0024): `mark_not_received` clears another person's mark and puts a warning on their card. Like "I paid you back", it's no stronger than `unmark_paid`, which the payer already has; it's logged with the payer as actor; and it only works on the person's **current** mark, named by its exact cents **and** `settled_at` (`p_expected_cents`, `p_expected_at`). So a replayed old call can't clear a newer payment of the same amount ([stale-state checks](stale-state-checks.md), "Amount and time together").
+  - **The payer's silent `unmark_paid`** (SV-26): in the app the payer now gets "Not received" instead of Undo, so the person is told. But the database still lets the payer call `unmark_paid` directly, which clears a mark with only an Activity line. Kept on purpose for this slice. Once there are several payers ([ADR 0023](../decisions/0023-several-payers.md)), `unmark_paid` will need a "to whom" argument (`docs/before-production.md` §4). *(Note 2026-11-27: done. It's now `unmark_paid(bill, user, payer)`, and it deletes only that pair's current mark. The silent clear itself is still allowed.)*
+  - **Who paid, as a direct caller** (2026-11-27, ADR 0023): the host can set any valid split (checked and logged exactly as from the app); anyone can stamp any well-formed plan key on their own payment (it can only re-plan routes, never change what anyone owes); a former payer can pay back on a pair they received. See "The payments ledger" below.
+  - **A repeated `mark_paid`** returns `created = false` and changes nothing. That's what stops the app opening Venmo twice; it isn't a security check, and a direct caller gains nothing by repeating it.
   - *No longer on this list:* **K6** (marking paid on an all-$0 bill). Since 2026-11-25 the database refuses it with `22023 all_zero`, the same rule as the app (ADR 0021).
 - **Not limited at all yet:** how *often* someone calls things. There's no rate limiting without a backend (`docs/before-production.md` §4).
 - **Private because the database hides it, not because the screen does:** whether you've opened a bill. No screen shows the host who has looked at their bill, but that alone wouldn't be enough: if the data sat in a table the host can read, a script could read it. So it lives in `bill_seen`, which no client can read at all. See "Read state is owner-only: `bill_seen`" below.
@@ -231,6 +236,129 @@ This is the same rule as the Venmo prompt timestamp above, one size bigger: owne
 
 Tests: `supabase/tests/database/bill_markers.test.sql` (criteria 1–16: the table's shape and grants, `42501` on direct reads and writes, the no-side-channel check, and what `my_bills()` returns to each user).
 
+### Shared facts on the shared row, private choices on the device (2026-11-27)
+The Sent via Venmo slice added four columns to `bill_participants`: how a mark was paid (`settled_method`) and the "Not received" flag (`not_received_cents`, `not_received_method`, `not_received_by`). Everyone on the bill can read them, and writing them broadcasts a "changed" hint. That's fine, because they're **shared facts**: the same thing already shows in Activity ("Sam sent Hana $15.10 via Venmo", "Hana hasn't received Sam's $15.10"), and the other people on the bill are meant to see them. No grant changed. No client can write them directly (`42501`); only `mark_paid`, `settle_difference`, `mark_not_received`, `unmark_paid` and `set_payer` do.
+
+The **remembered** choice ("last time I picked Cash") is different: it's a private preference. A column on `profiles` would be readable by everyone you share a bill with. So it stays on the device (`splitit.payMethod.v1.<userId>`), as do the check-in answers (SV-18). The test for where data goes is the same as for `bill_seen`: *who can read it, and does writing it make anything visible to someone else?*
+
+*Note 2026-11-27 (Who paid, [ADR 0023](../decisions/0023-several-payers.md)): these four columns, and `settled_at` / `settled_cents`, no longer exist. Marks moved to `bill_payments` and flags to `bill_payment_flags` (migrations `20261127140000`–`140002`). They're still shared facts, readable by everyone on the bill. See the next-but-two section.*
+
+### Groups: co-members, member-only tables, and assigning as a definer-only write (2026-11-27)
+*Added with the Groups MVP ([ADR 0022](../decisions/0022-groups.md), spec `docs/specs/2026-11-26-groups-mvp.md`).*
+
+**Co-members can read each other's profile.** Members of one group need each other's names and Venmo usernames to pay each other, even with no shared bill (user decision U-G5). So the groups migration (`supabase/migrations/20261126082511_groups.sql`) replaced the profiles SELECT policy with one that adds a third case:
+```sql
+create policy "profiles_select_own_or_co_participant_or_co_member"
+  on public.profiles for select to authenticated
+  using (
+    id = (select auth.uid())
+    or private.shares_bill_with(id)
+    or private.shares_group_with(id)
+  );
+```
+Still **one** permissive policy, so the advisor warning from 2026-11-22 doesn't come back. The **column grants didn't change**: co-members see `id`, `display_name` and `venmo_username`, exactly what co-participants see, and `select *` still fails with `42501`. Example: Ana and Dee are in "Tahoe trip" but never on the same bill. Dee can read Ana's name and handle. Oli, in no group or bill with Ana, gets 0 rows.
+
+**Group tables: members read, nobody writes.** `groups`, `group_members`, `group_events`, `expenses`, `expense_shares` and `group_payments` each have RLS on, `revoke all … from anon, authenticated, public`, a `grant select` to `authenticated`, and one policy `using (private.is_group_member(group_id))` (on `groups` itself, `id`). A non-member gets 0 rows. There is **no INSERT, UPDATE or DELETE grant** on any of them, so a direct write fails with `42501`. Every change goes through a `security definer` function (`create_group`, `add_expense`, `record_payment`, …) that checks membership and the rules itself ([ADR 0013](../decisions/0013-writes-through-database-functions.md)). `group_hidden` ("Hide for me") has no client grant at all, like `bill_seen`: it's private to you and read only through `my_groups()`.
+
+**Assigning items: the one exception to "write only your own claims".** On a bill in a group, any member may set who had an item (U-G6). The claims RLS policies weren't loosened to allow this. They still let you write only your own claim, on every bill. Instead, `assign_item` is a `security definer` function (`supabase/migrations/20261127062139_assign_item.sql`). It runs as the owner, so it can write other people's claims, and it makes its own checks first:
+- the bill is in a group, and the caller is a member of that group;
+- every person being assigned is a member;
+- the claimers the screen showed still match (`p_expected`, a [stale-state check](stale-state-checks.md)).
+
+A bill that isn't in a group, a caller who isn't a member, and a bill that doesn't exist all get the same `42501 not_allowed`, so the call can't be used to learn which bills exist (the `not_linked` rule above). Every assignment is logged as "Ana assigned Tacos to Ben". That's why it's safe to give the power to a function: the function is the only door, and it can only do this one thing. Granting `authenticated` INSERT on other people's claims would have opened it on every bill.
+
+Tests: `supabase/tests/database/groups.test.sql` (criteria 8, 9, 12), `assign_item.test.sql` (criteria 38–43).
+
+### "I wasn't part of this": `bill_not_part`, owner-only with an own-rows read (2026-11-27)
+*Added with `docs/specs/2026-11-27-group-claim-status.md` (contract C3, decisions GCS-3 and GCS-4). Migration: `supabase/migrations/20261127150000_bill_not_part.sql`.*
+
+**What it's for.** On a group bill, Ben can say "I wasn't part of this" so the app stops reminding him to claim. The database has to remember that per person, per bill. It's private, like "seen": nobody else needs to know, and Ana shouldn't be able to tell that Ben opted out (GCS-3).
+
+So it's the **second owner-only per-person table**, after `bill_seen`. Same questions, same answers: *can another person read it?* No. *Does writing it make anything visible to another person?* No: no Activity line, no Realtime message, no change to any shared row.
+
+**One difference from `bill_seen`: the owner can read their own rows.**
+- `bill_seen` has no grant at all. Even Sam's own `select` fails with `42501`, and the app learns "seen" only through `my_bills()`.
+- `bill_not_part` has `grant select (bill_id, user_id, created_at) to authenticated`, plus one policy, `using (user_id = (select auth.uid()))`. Ben's `select` returns only his own rows. Ana running the same query on the same bill gets 0 rows, even though she's on that bill. `anon` has no grant, so its `select` fails with `42501`.
+
+Why allow the read here? The bill screen needs to know "did I opt out of this bill?" (`fetchNotPart` in `lib/groups.ts`). A plain own-rows read does that with no new function. It's safe because the policy can only ever show your own rows, so the column grant can't leak to co-participants (compare "A column grant applies to every row RLS shows you" above: here RLS shows you only your rows).
+
+**Nobody writes it directly.** There's no INSERT, UPDATE or DELETE grant, so a direct write (or an upsert) fails with `42501`. The only writer is `set_not_part(bill, not_part)`, a `security definer` function that works only on the caller's own row ([database functions](database-functions.md)):
+- signed out, null arguments, no such bill, or not a participant: all the same `42501 not_allowed` (one answer, so it can't be used to find bills);
+- `true` on a bill outside a group: `22023 not_in_group`;
+- `true` when you've claimed anything on the bill: `22023 has_claims` ("claims win");
+- `false` always works for a participant, group or not, so an old opt-out can always be cleared.
+
+**A trigger on `claims` keeps it honest.** `claims_clear_not_part` runs after every insert into `claims` and deletes the claimer's `bill_not_part` row for that bill. It catches every way you can get a claim: claiming yourself (`set_claim`, `set_item_split`), someone assigning you (`assign_item`), or a direct insert (GCS-4). Example: Ben opted out of the dinner; Ana assigns him the Nachos; his opt-out is gone, so if the Nachos are later taken off him, the reminder comes back. The trigger function is `security definer` with EXECUTE revoked from every client role. On the installed Postgres 17, a trigger function's EXECUTE is checked only when the trigger is created, not when it fires, so inserts by `authenticated` and `service_role` still work (the migration header says it was checked, and the pgTAP test proves both).
+
+**It goes away with the participant row.** A foreign key `(bill_id, user_id) → bill_participants on delete cascade`, the same shape as `bill_seen`. Leaving, being removed, deleting the bill or deleting the account all remove it. There's no foreign key to `profiles` or `auth.users`, so it doesn't block account deletion.
+
+**How the group screen gets it.** `group_snapshot` (a definer function) returns `me.not_part_bill_ids`: only the caller's own opt-outs for that group's bills, never anyone else's.
+
+Tests: `supabase/tests/database/bill_not_part.test.sql` (criteria 1–11: grants and `42501`s, own rows only, the function's errors, the trigger on three insert paths, the snapshot field, the cascade).
+
+### The payments ledger: tables nobody writes, not even `service_role` (2026-11-27)
+*Added with Who paid ([ADR 0023](../decisions/0023-several-payers.md), spec `docs/specs/2026-11-26-who-paid.md` A1.3). Migrations: `supabase/migrations/20261127140000_bill_payments.sql` and `20261127140002_who_paid.sql`.*
+
+Three new tables hold money facts:
+- `bill_payments`: one row per money movement ("Priya sent Sam $12.00 via Venmo"). A **ledger**: rows are added, never changed ([who pays whom](who-pays-whom.md)).
+- `bill_payment_flags`: "Not received" flags.
+- `bill_payers`: who paid the restaurant how much, on a split bill.
+
+**Reading: everyone on the bill, nobody else.** Each table has RLS on and one policy, `for select to authenticated using (private.is_bill_participant(bill_id))`. Payments are shared facts, like claims: Dee should see that Sam paid Hana. An outsider gets 0 rows. `anon` has no grant, so its `select` fails with `42501`.
+
+**Writing: no grant for anyone, `service_role` included.** The migrations say:
+```sql
+revoke all on public.bill_payments from anon, authenticated, public, service_role;
+grant select on public.bill_payments to authenticated;
+```
+Note the fourth role. Earlier tables only revoked `anon`, `authenticated` and `public`, so Supabase's default privileges still let `service_role` write them (`docs/before-production.md` §4). Here it's revoked too, the same stance as `bill_events` and `group_payments`. Why go that far?
+- **`service_role` skips RLS, but not grants.** Supabase's docs say the API uses this role "to bypass Row Level Security", so policies don't stop it. (In Postgres terms that's a role with the `BYPASSRLS` attribute; that it's this attribute is *unverified* against Supabase's docs.) A missing **grant** still stops it: Postgres checks privileges first (the "Two layers" section above). Revoking is the only way to say "not even the service key".
+- **A forged payment is a money lie.** If any key could insert "Sam sent Hana $50", Settle up would tell Hana she's been paid. Nothing legitimate writes the ledger except our security definer functions (`mark_paid`, `settle_difference`, `unmark_paid`, `mark_not_received`, `set_payer(s)`), which run as the owner (`postgres`) and so don't need a grant.
+- So a direct `insert`, `update`, `delete` or `truncate` from any client role fails with `42501`.
+
+**And rows can't be updated, even by the owner.** A grant can't stop the table's owner, and the definer functions *are* the owner. So the first migration adds a trigger:
+```sql
+create trigger bill_payments_no_update
+  before update on public.bill_payments
+  for each row
+  execute function private.bill_payments_no_update();  -- raises 42501 payments_are_immutable
+```
+A row trigger fires for every role, so no function written later can quietly "fix" a payment's amount. The only changes allowed are an insert (a new movement) and a delete (Undo or "Not received", which mean "this never happened"). This is the same idea as the append-only guard on Activity ([audit log](audit-log.md)).
+
+**What a direct caller can still do** (honor system, recorded in the migration headers):
+- the host can set any valid split, checked and logged as from the app;
+- anyone can record a payment from themselves to any current payer, as in ADR 0015;
+- anyone can stamp any well-formed plan key on their own payment. The database only checks the format (16 lowercase hex). A wrong key only makes routes re-plan; positions always count every payment, so nobody's amount changes;
+- a former payer can pay back on a pair they received (they may be holding someone's money).
+
+Tests: `supabase/tests/database/bill_payments.test.sql` and `who_paid.test.sql` (`42501` on every direct write as `authenticated`, `anon` refused, 0 rows for an outsider, the no-update trigger).
+
+### Usernames: readable by co-people, written only through an RPC (2026-11-28)
+*Added with the usernames groundwork ([ADR 0026](../decisions/0026-usernames.md), spec `docs/specs/2026-11-28-usernames.md`). Migration: `supabase/migrations/20261128070000_usernames.sql`.*
+
+`profiles.username` (`@yash_s`) splits the two layers in a new way: **one role may read the column but not write it.** The migration grants `select (username)` to `authenticated`, and nothing else. No policy changed, so the existing row policy decides who sees it: you, people you share a bill with, people you share a group with. That's exactly who sees your display name. A stranger gets 0 rows, and anon gets `42501`.
+
+There's no `update (username)` grant, not even for the owner. So `update profiles set username = 'yash_s' where id = <own id>` fails with `42501`. Compare `venmo_username`, which has a column UPDATE grant. Why the difference? The only way in is `set_username`, a definer function ([database functions](database-functions.md), "`set_username`: turning a constraint name into an error code"). It gives the app separate answers for "taken", "reserved" and "invalid", which a direct update can't. It also writes only the caller's own row, because it reads the row id from `auth.uid()`, not from a parameter.
+
+So: **read** is a column grant plus the row policy; **write** is no grant plus one function. Use this shape whenever co-people should see a value but changing it needs checks a grant can't express.
+
+The username rule widens only through a function too. Search, when built, will be one exact-match definer function that returns a few columns, never a looser `profiles` policy (ADR 0026, "Later: search").
+
+Tests: `supabase/tests/database/usernames.test.sql` (criteria 7–9: co-participant and co-member reads, 0 rows for a stranger, `42501` for anon and for a direct update, the column privileges).
+
+### The Activity feed: privacy that is only a display rule (2026-11-28)
+*Added with the tab bar and Activity feed ([ADR 0025](../decisions/0025-tab-bar-and-activity.md), spec `docs/specs/2026-11-28-tab-bar-and-activity.md` risk R1). No migration.*
+
+The Activity tab shows amounts only for your own money: "Sam marked $18.20 paid to you". It never shows "Sam marked $18.20 paid to Maya". That rule is in `classifyFeedEvent` (`lib/feedRules.ts`), and the tests check it on every fixture.
+
+**But the database doesn't enforce it.** The feed reads `bill_events` and `group_events` with the existing policies (`bill_events_select_participant`, `group_events_select_member`). They show every participant every event row on their bills, amounts and all. That's on purpose: the per-bill Activity screen already shows "Sam marked $18.20 paid to Maya" to everyone on the bill, and payments are shared facts (like the ledger above). So a person with a script and their own login can read the same amounts the feed leaves out.
+
+So the feed's rule is a **display rule**: it decides what the timeline is about (you). It isn't a **security boundary**: it doesn't make anyone's payments secret. The test from "The app is not the only client" gives the answer straight away. *Can another person read the row?* Yes. Then hiding it on one screen doesn't make it private.
+
+Compare the feed's seen state. It's truly private, but not because of RLS: it never reaches the database at all. It lives on your phone (`lib/feedSeen.ts`, FEED-30), so there's nothing for anyone else to read, and writing it touches nothing shared.
+
+If amounts between other people ever have to be private, the fix belongs in the database: a narrower policy, or a definer read function that leaves them out. Changing the app alone wouldn't help. The question is open for the user before real users arrive (`docs/before-production.md` §4).
+
 ## Pitfalls
 - **Forgetting to enable RLS on a new table** means it's readable by everyone. Every migration that creates a table should enable RLS in the same file.
 - **Infinite recursion:** a policy on `bill_participants` that queries `bill_participants` loops forever. The standard fix is a `security definer` helper function that runs with the owner's rights, has `set search_path = ''`, and is used inside policies. Ours is `private.is_bill_participant(bill_id)` (`20261121074115_bills_claims.sql:157-170`).
@@ -244,6 +372,9 @@ Tests: `supabase/tests/database/bill_markers.test.sql` (criteria 1–16: the tab
 - Testing only as the owner. Always test as a *second* user, who should be denied.
 - **"The app never does that."** The app isn't the only client: anyone signed in can call the Data API directly with the public key. If a rule matters, the database must enforce it; otherwise record it as an accepted risk (see "The app is not the only client").
 - **A definer function's errors saying more than RLS would.** "No such user" vs "not linked" tells a caller which accounts exist. Give one error for every case the caller isn't allowed to tell apart, and test that they're identical (`add_participant`'s `not_linked`).
+- **Forgetting `service_role` in the revoke.** `revoke all … from anon, authenticated, public` leaves Supabase's default grants for `service_role`, and it skips RLS. For tables only definer functions should write (the ledger), revoke it too.
+- **Relying on grants to stop the owner.** Definer functions run as the owner, and grants don't apply to it. If rows must never change, say so with a `before update` trigger that raises (`bill_payments_no_update`).
+- **Calling a display rule "privacy".** If the policy lets someone read a row, a screen that doesn't show it hides nothing. Write it down as a display rule (like the Activity feed's amounts), or enforce it in the database.
 - **Hiding private data but leaking it through a side effect.** Data no one else can read can still leak if writing it fires a broadcast, logs an event or updates a row others can see. Then the *timing* gives it away. Private writes (like `mark_bill_seen`) go to a table with no triggers and touch nothing shared.
 
 ## Check yourself
@@ -261,6 +392,17 @@ Tests: `supabase/tests/database/bill_markers.test.sql` (criteria 1–16: the tab
 12. The app only ever unclaims through `set_claim`. Can a signed-in user still delete their own claim row without the app? What stops them deleting *someone else's* claim?
 13. Why isn't "Sam has opened this bill" a `last_seen_at` column on `bill_participants`? Give both reasons: one about who can read it, one about what writing it would set off.
 14. Sam runs `select seen_at from bill_seen where user_id = <his own id>` from a script. What does he get, and why? How does the app learn his `seen` value, then?
+15. The new `settled_method` and `not_received_*` columns are on `bill_participants`, which every participant can read. Why is that fine here, when "seen" had to go in its own table?
+16. Hana, the payer, calls `mark_not_received` from a script with Sam's old cents and time after Sam has paid again. What happens? What could she still do directly that the app no longer offers her?
+17. Dee and Ana share a group but no bill. Can Dee read Ana's `venmo_username`? Can she read Ana's `created_at`? Which layer decides each answer?
+18. Ana assigns the Tacos to Ben on a group bill. Why does that go through `assign_item` instead of a change to the claims RLS policy? What would go wrong with the policy change?
+19. `bill_not_part` grants `select` to `authenticated`, but `bill_seen` grants nothing. Why is the grant safe for `bill_not_part`? What does Ana get if she selects Ben's opt-out on a bill they share?
+20. Ben opted out of a bill, and then Ana assigns him an item on it. What removes his opt-out, and why is it a trigger on `claims` rather than a check inside `set_not_part`?
+21. A script holding the service-role key runs `insert into bill_payments …`. What happens, and why doesn't skipping RLS help it?
+22. `mark_paid` runs as the table owner, so grants don't limit it. What stops a future edit of a definer function from changing an existing payment's `cents`?
+23. Sam stamps a made-up plan key on his own payment from a script. What can that change on Hana's Settle screen, and what can't it change?
+24. Ana can update her own `venmo_username` directly, but `update profiles set username = 'ana' where id = <her id>` fails with `42501`. Which layer refuses, and why was it set up that way instead of granting `update (username)`?
+25. The Activity feed never shows Ana what Sam paid Maya. Ana runs `select details from bill_events where bill_id = <their bill>` from a script. What does she get? What would it take to make those amounts truly private?
 
 ## Learn more
 - https://supabase.com/docs/guides/database/postgres/row-level-security
@@ -269,5 +411,8 @@ Tests: `supabase/tests/database/bill_markers.test.sql` (criteria 1–16: the tab
 - PostgreSQL, `GRANT` (column privileges): https://www.postgresql.org/docs/current/sql-grant.html
 - PostgreSQL, `UPDATE` (which privileges an update needs): https://www.postgresql.org/docs/current/sql-update.html
 - supabase-js, `.select()` after a write: https://supabase.com/docs/reference/javascript/update
+- PostgreSQL, `CREATE TRIGGER` (EXECUTE on the trigger function is needed by whoever creates the trigger): https://www.postgresql.org/docs/current/sql-createtrigger.html
+- PostgreSQL, role attributes (`BYPASSRLS` skips row security policies): https://www.postgresql.org/docs/current/role-attributes.html
+- Supabase, Postgres roles (`service_role` and its access): https://supabase.com/docs/guides/database/postgres/roles
 - Supabase, database advisors (incl. "multiple permissive policies"): https://supabase.com/docs/guides/database/database-advisors
 - OWASP, Authentication Cheat Sheet ("Authentication and Error Messages": generic responses so attackers can't tell which accounts exist): https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html

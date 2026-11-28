@@ -1,0 +1,248 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-25T16:00:02.368Z",
+  "title": "Design System: SplitIt",
+  "extensions": {
+    "colorMeta": {
+      "settle-teal": {
+        "role": "primary",
+        "displayName": "Settle Teal",
+        "canonical": "#0F766E",
+        "tonalRamp": [
+          "#042F2E",
+          "#134E4A",
+          "#115E59",
+          "#0F766E",
+          "#0D9488",
+          "#14B8A6",
+          "#5EEAD4",
+          "#CCFBF1"
+        ]
+      },
+      "settle-teal-dark": {
+        "role": "primary",
+        "displayName": "Settle Teal (dark mode)",
+        "canonical": "#2DD4BF"
+      },
+      "teal-wash": {
+        "role": "primary",
+        "displayName": "Teal Wash",
+        "canonical": "#E6F4F2"
+      },
+      "table-grey": {
+        "role": "neutral",
+        "displayName": "Table Grey",
+        "canonical": "#F3F4F6"
+      },
+      "receipt-paper": {
+        "role": "neutral",
+        "displayName": "Receipt Paper",
+        "canonical": "#FFFFFF"
+      },
+      "paper-muted": {
+        "role": "neutral",
+        "displayName": "Muted Paper",
+        "canonical": "#F1F3F5"
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "canonical": "#111827"
+      },
+      "ink-muted": {
+        "role": "neutral",
+        "displayName": "Muted Ink",
+        "canonical": "#4B5563"
+      },
+      "control-border": {
+        "role": "neutral",
+        "displayName": "Control Border",
+        "canonical": "#7B8592"
+      },
+      "hairline": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "#E5E7EB"
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "The bill total and single hero figures."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Screen titles."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Card and choice titles."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Rows, paragraphs, input text."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Buttons and segments."
+      },
+      "section": {
+        "displayName": "Section",
+        "purpose": "Group labels above rows, in Muted Ink."
+      },
+      "caption": {
+        "displayName": "Caption",
+        "purpose": "Hints, secondary lines, field labels."
+      },
+      "micro": {
+        "displayName": "Micro",
+        "purpose": "Avatar initials and +N counts only."
+      }
+    },
+    "shadows": [
+      {
+        "name": "tappable-card",
+        "value": "0 1px 3px rgba(17, 24, 39, 0.08)",
+        "purpose": "Only on a card whose whole surface is one tap target (ChoiceCard)."
+      }
+    ],
+    "motion": [
+      {
+        "name": "press",
+        "value": "opacity 0.7 while pressed",
+        "purpose": "The only routine motion: quiet press feedback. Disabled is opacity 0.5."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "message",
+        "value": "360px"
+      },
+      {
+        "name": "content",
+        "value": "560px"
+      },
+      {
+        "name": "form",
+        "value": "640px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The one main next step on a screen.",
+      "html": "<button class=\"ds-btn-primary\">Pay Sam $18.40 on Venmo</button>",
+      "css": ".ds-btn-primary{font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, system-ui, sans-serif;font-size:15px;line-height:20px;font-weight:600;min-height:44px;padding:8px 16px;border-radius:12px;border:1px solid #0F766E;background:#0F766E;color:#fff;cursor:pointer}.ds-btn-primary:active{opacity:.7}.ds-btn-primary:focus-visible{outline:2px solid #0F766E;outline-offset:2px}"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "The default button: supporting actions.",
+      "html": "<button class=\"ds-btn-secondary\">Share link</button>",
+      "css": ".ds-btn-secondary{font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, system-ui, sans-serif;font-size:15px;line-height:20px;font-weight:600;min-height:44px;padding:8px 16px;border-radius:12px;border:1px solid transparent;background:#E6F4F2;color:#0F766E;cursor:pointer}.ds-btn-secondary:active{opacity:.7}.ds-btn-secondary:focus-visible{outline:2px solid #0F766E;outline-offset:2px}"
+    },
+    {
+      "name": "Danger Button",
+      "kind": "button",
+      "refersTo": "button-danger",
+      "description": "Destructive actions; never the default.",
+      "html": "<button class=\"ds-btn-danger\">Leave bill</button>",
+      "css": ".ds-btn-danger{font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, system-ui, sans-serif;font-size:15px;line-height:20px;font-weight:600;min-height:44px;padding:8px 16px;border-radius:12px;border:1px solid transparent;background:#FEF3F2;color:#B42318;cursor:pointer}.ds-btn-danger:active{opacity:.7}.ds-btn-danger:focus-visible{outline:2px solid #0F766E;outline-offset:2px}"
+    },
+    {
+      "name": "Money Field",
+      "kind": "input",
+      "refersTo": "text-field",
+      "description": "Text field with a $ prefix and tabular figures.",
+      "html": "<label class=\"ds-field\"><span class=\"ds-field-label\">Tip</span><span class=\"ds-field-box\"><span class=\"ds-field-prefix\">$</span><input class=\"ds-field-input\" inputmode=\"decimal\" value=\"8.00\"></span></label>",
+      "css": ".ds-field{display:flex;flex-direction:column;gap:4px;font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, system-ui, sans-serif}.ds-field-label{font-size:13px;line-height:18px;font-weight:600;color:#4B5563}.ds-field-box{display:flex;align-items:center;gap:4px;min-height:44px;padding:0 12px;border:1px solid #7B8592;border-radius:8px;background:#fff}.ds-field-box:focus-within{border:2px solid #0F766E;padding:0 11px}.ds-field-prefix{font-size:16px;color:#4B5563}.ds-field-input{flex:1;border:0;outline:0;font:inherit;font-size:16px;line-height:22px;color:#111827;font-variant-numeric:tabular-nums;background:transparent}"
+    },
+    {
+      "name": "Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "A real group (items, totals) on Receipt Paper.",
+      "html": "<section class=\"ds-card\"><header class=\"ds-card-head\"><h3 class=\"ds-card-title\">Totals</h3><span class=\"ds-card-aside\">3 people</span></header><div class=\"ds-card-row\"><span>Total</span><span class=\"ds-money\">$64.20</span></div></section>",
+      "css": ".ds-card{font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, system-ui, sans-serif;background:#fff;border:1px solid #E5E7EB;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:12px;color:#111827}.ds-card-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px}.ds-card-title{margin:0;font-size:17px;line-height:22px;font-weight:600}.ds-card-aside{font-size:13px;line-height:18px;color:#4B5563}.ds-card-row{display:flex;justify-content:space-between;font-size:16px;line-height:22px}.ds-money{font-variant-numeric:tabular-nums;font-weight:700}"
+    },
+    {
+      "name": "Segmented Control",
+      "kind": "custom",
+      "refersTo": "segmented-selected",
+      "description": "Small exclusive choices: proportional vs even, % vs $.",
+      "html": "<div class=\"ds-seg\" role=\"radiogroup\"><button class=\"ds-seg-opt ds-seg-on\" role=\"radio\" aria-checked=\"true\">Proportional</button><button class=\"ds-seg-opt\" role=\"radio\" aria-checked=\"false\">Even</button></div>",
+      "css": ".ds-seg{display:inline-flex;padding:2px;border-radius:8px;background:#F1F3F5;font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, system-ui, sans-serif}.ds-seg-opt{min-height:40px;padding:0 12px;border:0;border-radius:6px;background:transparent;color:#111827;font-size:15px;line-height:20px;font-weight:600;cursor:pointer}.ds-seg-on{background:#0F766E;color:#fff;font-weight:700}.ds-seg-opt:active{opacity:.7}.ds-seg-opt:focus-visible{outline:2px solid #0F766E;outline-offset:2px}"
+    },
+    {
+      "name": "List Row",
+      "kind": "custom",
+      "refersTo": "list-row",
+      "description": "Person or bill row with avatar, caption and a right-aligned figure.",
+      "html": "<div class=\"ds-row\"><span class=\"ds-avatar\">SK</span><span class=\"ds-row-text\"><span class=\"ds-row-title\">Sam Kim</span><span class=\"ds-row-cap\">2 items</span></span><span class=\"ds-money\">$18.40</span></div>",
+      "css": ".ds-row{display:flex;align-items:center;gap:12px;min-height:56px;padding:12px 16px;font-family:-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, system-ui, sans-serif;color:#111827}.ds-row:active{background:#F1F3F5}.ds-avatar{width:32px;height:32px;border-radius:999px;background:#E6F4F2;color:#0F766E;display:inline-flex;align-items:center;justify-content:center;font-size:11px;line-height:13px;font-weight:700}.ds-row-text{flex:1;display:flex;flex-direction:column;gap:4px}.ds-row-title{font-size:16px;line-height:22px}.ds-row-cap{font-size:13px;line-height:18px;color:#4B5563}.ds-money{font-variant-numeric:tabular-nums;font-weight:600}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Quiet Receipt at a Calm Table",
+    "overview": "SplitIt should feel like a clean, honest receipt laid on a calm table. The receipt part: plain paper surfaces, figures that line up in tabular columns, and the money as the loudest thing on screen. The calm table part: the app is used one-handed, in dim light, with friends waiting, so every screen has generous space, one obvious next step, and nothing that competes for attention. The honest ledger runs underneath: every number is accounted for, and any status (unclaimed, doesn't add up, self-reported \"paid\") is said in words, never in colour alone.\n\nDensity is moderate: comfortable rows (56 px minimum with an avatar), a 16 px screen edge, and reading columns held to 560 px so the layout stays phone-shaped even on a wide browser. Ambition shows as precision and restraint: consistent radii with continuous corners, one icon stroke, aligned figures, finished pressed and focus states. The user's brief is explicit: clean and pretty, \"not over the top\".",
+    "keyCharacteristics": [
+      "Flat surfaces grouped by tone and hairlines, not shadows.",
+      "One Settle Teal voice for the next step; everything else is ink and paper.",
+      "Money set in tabular numerals, right-aligned, the bill total the largest figure.",
+      "Light and dark are equal citizens; every text pair is 4.5:1 or better in both.",
+      "Platform-native system type (SF Pro, Roboto, system-ui), sized by a fixed 8-step scale."
+    ],
+    "rules": [
+      {
+        "name": "The One Voice Rule",
+        "body": "Settle Teal is the only accent colour. It marks the next step and what's selected. Never give a screen its own accent, and never use teal for decoration.",
+        "section": "colors"
+      },
+      {
+        "name": "The Said-Not-Shaded Rule",
+        "body": "Every status colour comes with an icon or words (\"Doesn't add up by $0.02\"). Error and warning icons also differ in shape (circle vs triangle), so they read without colour.",
+        "section": "colors"
+      },
+      {
+        "name": "The Brand-Is-Theirs Rule",
+        "body": "Google's sign-in button uses Google's own colours (`googleButtonColors` in `lib/theme.ts`), and only that button does.",
+        "section": "colors"
+      },
+      {
+        "name": "The Receipt Column Rule",
+        "body": "Money is always tabular (`tabularNums`), right-aligned in lists, with the `$` shown, and formatted only through `lib/money.ts`. The bill total is the largest number on the screen.",
+        "section": "typography"
+      },
+      {
+        "name": "The Scale-Stays-On Rule",
+        "body": "Font scaling (Dynamic Type) stays on; text containers never get fixed heights.",
+        "section": "typography"
+      },
+      {
+        "name": "The Flat-By-Default Rule",
+        "body": "Surfaces are flat. A shadow means \"this whole card is tappable\" and nothing else. Grouping is done with tone, space and hairlines.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "**Do** take every colour, space, radius and type size from `lib/theme.ts`; no raw hex in screens.",
+      "**Do** keep one filled Settle Teal button per screen and fold rare options behind a quiet control (\"+ Add note\").",
+      "**Do** set money in tabular numerals, right-aligned, with the total the largest figure.",
+      "**Do** design every state: empty (a friendly hint plus the action), loading, error, disabled.",
+      "**Do** keep touch targets at 44×44 or larger (use `hitSlop` on small icons), and check both light and dark mode.",
+      "**Do** use continuous corners and the single icon stroke (1.75) everywhere."
+    ],
+    "donts": [
+      "**Don't** add shadows for depth; a shadow only means \"the whole card is tappable\".",
+      "**Don't** introduce a second accent colour, gradients, glassmorphism, decorative illustrations, confetti or bouncy entrance animations.",
+      "**Don't** show status by colour alone; always pair it with an icon or words.",
+      "**Don't** use emoji as icons, or mix in a second icon set.",
+      "**Don't** fix the height of a text container or turn off font scaling.",
+      "**Don't** use Google's button colours anywhere except the Google sign-in button."
+    ]
+  }
+}

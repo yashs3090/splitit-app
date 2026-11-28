@@ -1,6 +1,7 @@
 // ListRow: one row in a grouped list (people, bills, settle rows, activity).
 // Leading slot (avatar or icon), a title with an optional caption, a trailing slot (money, a button,
-// a chevron). Tappable rows get a full-width pressed background; rows are separated by a hairline
+// a chevron). Tappable rows get a full-width pressed background (a highlighted row dims its content
+// instead, over its fill); rows are separated by a hairline
 // that starts at the content edge (iOS inset style).
 //
 // Group rows in a `flush` Card, so the pressed background reaches the card's edges and follows
@@ -8,9 +9,11 @@
 import type { ReactNode } from 'react';
 import { Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from 'react-native';
 
-import { ROW_MIN_HEIGHT, space, type, useTheme } from '@/lib/theme';
+import { opacity, ROW_MIN_HEIGHT, space, type, useTheme } from '@/lib/theme';
 
 import { useFocusRing } from './useFocusRing';
+
+export type ListRowHighlight = 'warning' | 'muted';
 
 type Props = {
   title: string;
@@ -40,6 +43,15 @@ type Props = {
    * False: no side padding, for rows inside a padded card next to other content (a search field).
    */
   edgeToEdge?: boolean;
+  /**
+   * A soft background that is never the only cue (the row's words say it too):
+   * - `'warning'` (or `true`): `warningSurface`, for a row that waits on the viewer ("Claim your items").
+   * - `'muted'`: `surfaceMuted`, for a row that is done ("Settled up").
+   * A highlighted row keeps its fill while pressed and dims its content to `opacity.pressed`
+   * instead, because `surfaceMuted` is also the plain row's pressed background (so a muted row
+   * would otherwise look stuck pressed). Spec 2026-11-28-tab-bar-and-activity Contract M, Task 10.
+   */
+  highlight?: boolean | ListRowHighlight;
   style?: StyleProp<ViewStyle>;
 };
 
@@ -54,14 +66,23 @@ export function ListRow({
   accessibilityRole = 'button',
   divider = false,
   edgeToEdge = true,
+  highlight = false,
   style,
 }: Props) {
   const { colors } = useTheme();
   const { focusProps, ringStyle } = useFocusRing();
 
   const groupStatic = !onPress && accessibilityLabel !== undefined;
-  const content = (
-    <View style={[styles.content, !edgeToEdge && styles.noSide, divider && [styles.divider, { borderTopColor: colors.divider }]]}>
+  const hue: ListRowHighlight | null = highlight === true ? 'warning' : highlight === false ? null : highlight;
+  const renderContent = (dim: boolean) => (
+    <View
+      style={[
+        styles.content,
+        !edgeToEdge && styles.noSide,
+        divider && [styles.divider, { borderTopColor: colors.divider }],
+        dim && styles.pressedContent,
+      ]}
+    >
       <View
         accessible={groupStatic ? true : undefined}
         accessibilityLabel={groupStatic ? accessibilityLabel : undefined}
@@ -81,7 +102,8 @@ export function ListRow({
     </View>
   );
 
-  if (!onPress) return <View style={[edgeToEdge && styles.row, style]}>{content}</View>;
+  const tint = hue === null ? null : { backgroundColor: hue === 'muted' ? colors.surfaceMuted : colors.warningSurface };
+  if (!onPress) return <View style={[edgeToEdge && styles.row, tint, style]}>{renderContent(false)}</View>;
   return (
     <Pressable
       accessibilityRole={accessibilityRole}
@@ -89,9 +111,16 @@ export function ListRow({
       accessibilityHint={accessibilityHint}
       onPress={onPress}
       {...focusProps}
-      style={({ pressed }) => [styles.row, pressed && { backgroundColor: colors.surfaceMuted }, ringStyle && [ringStyle, styles.ringInside], style]}
+      style={({ pressed }) => [
+        styles.row,
+        tint,
+        // A plain row shows a pressed background; a highlighted one keeps its fill (its content dims).
+        pressed && hue === null && { backgroundColor: colors.surfaceMuted },
+        ringStyle && [ringStyle, styles.ringInside],
+        style,
+      ]}
     >
-      {content}
+      {({ pressed }) => renderContent(pressed && hue !== null)}
     </Pressable>
   );
 }
@@ -112,6 +141,7 @@ const styles = StyleSheet.create({
   // Title and caption: label-to-value spacing. minWidth 0 lets long names wrap instead of pushing
   // the trailing slot off the row.
   text: { flex: 1, minWidth: 0, alignItems: 'flex-start', gap: space.xs },
+  pressedContent: { opacity: opacity.pressed },
   // Rows sit edge to edge inside a clipped card, so the ring is drawn inside the row.
   ringInside: { outlineOffset: -2 },
 });

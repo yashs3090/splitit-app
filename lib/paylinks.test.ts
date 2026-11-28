@@ -2,9 +2,11 @@ import { Linking, Platform } from 'react-native';
 
 import {
   claimedItemNames,
+  closeOpenedTab,
   encodeVenmoNote,
   isSettleCents,
   openPaymentLink,
+  openPaymentLinkWeb,
   SETTLE_MAX_CENTS,
   SETTLE_MIN_CENTS,
   SETTLE_NOTE,
@@ -17,6 +19,9 @@ import {
   venmoPayUrlForFormat,
   venmoRequestUrl,
   venmoRequestUrlForFormat,
+  WEB_OPEN_CHECK_MS,
+  webOpenOutcome,
+  webOpenStillOpen,
   type VenmoLinkFormat,
   type VenmoPayInput,
 } from './paylinks';
@@ -496,5 +501,172 @@ describe('venmoRequestUrl (request spec criteria 1–5)', () => {
     expect(venmoPayUrl({ username: 'Tejesh-Bhaumik', cents: 1 })).toBe(
       'https://venmo.com/?txn=pay&recipients=Tejesh-Bhaumik&amount=0.01&note=SplitIt',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Web opener (docs/specs/2026-11-26-sent-via-venmo.md D2 "Web", Amendment A1 §1; criterion 24)
+// ---------------------------------------------------------------------------
+
+describe('openPaymentLinkWeb (criterion 24)', () => {
+  const URL_V1 = 'https://venmo.com/?txn=pay&recipients=hana-1&amount=15.10&note=SplitIt';
+  type FakeWindow = { closed: boolean; opener: unknown };
+  // In Jest (react-native preset) `window` is globalThis and has no `open`; each test installs one.
+  const win = window as unknown as { open?: unknown };
+  afterEach(() => {
+    delete win.open;
+  });
+
+  function installOpen(impl: (url: string, target: string) => FakeWindow | null) {
+    const open = jest.fn(impl);
+    win.open = open;
+    return open;
+  }
+
+  it('calls window.open(url, "_blank") synchronously, before any microtask runs, and returns no promise', () => {
+    const order: string[] = [];
+    const child: FakeWindow = { closed: false, opener: {} };
+    const open = installOpen(() => {
+      order.push('open');
+      return child;
+    });
+    void Promise.resolve().then(() => order.push('microtask'));
+    const result = openPaymentLinkWeb(URL_V1);
+    order.push('returned');
+    expect(order).toEqual(['open', 'returned']); // the queued microtask hasn't run yet
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(open).toHaveBeenCalledWith(URL_V1, '_blank'); // no 'noopener': it would make open() return null
+    expect(result).toBe(child);
+    expect(result).not.toBeInstanceOf(Promise);
+  });
+
+  it('cuts the new tab off from SplitIt: opener = null on the returned window', () => {
+    const child: FakeWindow = { closed: false, opener: { location: 'splitit' } };
+    installOpen(() => child);
+    openPaymentLinkWeb(URL_V1);
+    expect(child.opener).toBeNull();
+  });
+
+  it('returns null when the popup is blocked (window.open returns null)', () => {
+    installOpen(() => null);
+    expect(openPaymentLinkWeb(URL_V1)).toBeNull();
+  });
+
+  it('returns null when window.open throws, or is missing (never throws)', () => {
+    installOpen(() => {
+      throw new Error('SecurityError');
+    });
+    expect(openPaymentLinkWeb(URL_V1)).toBeNull();
+    delete win.open;
+    expect(() => openPaymentLinkWeb(URL_V1)).not.toThrow();
+    expect(openPaymentLinkWeb(URL_V1)).toBeNull();
+  });
+
+  it('still returns the window if setting opener throws', () => {
+    const child = {
+      closed: false,
+      get opener(): unknown {
+        return null;
+      },
+      set opener(_v: unknown) {
+        throw new Error('cross-origin');
+      },
+    };
+    installOpen(() => child);
+    expect(openPaymentLinkWeb(URL_V1)).toBe(child);
+  });
+
+  it('never goes through React Native Linking (which passes noopener and always returns null)', () => {
+    const openURL = jest.spyOn(Linking, 'openURL');
+    installOpen(() => ({ closed: false, opener: null }));
+    openPaymentLinkWeb(URL_V1);
+    expect(openURL).not.toHaveBeenCalled();
+    openURL.mockRestore();
+  });
+});
+
+describe('webOpenStillOpen', () => {
+  it('is true while the tab is open, false once closed', () => {
+    expect(webOpenStillOpen({ closed: false })).toBe(true);
+    expect(webOpenStillOpen({ closed: true })).toBe(false);
+  });
+
+  it('is false when reading closed throws (treated as closed: ask, never auto-mark)', () => {
+    const w = {
+      get closed(): boolean {
+        throw new Error('blocked');
+      },
+    };
+    expect(webOpenStillOpen(w)).toBe(false);
+  });
+});
+
+describe('webOpenOutcome (desktop asks, mobile checks the tab after WEB_OPEN_CHECK_MS, blocked writes nothing)', () => {
+  beforeEach(() => jest.useFakeTimers());
+  afterEach(() => jest.useRealTimers());
+
+  it('WEB_OPEN_CHECK_MS is the 300 ms starting value', () => {
+    expect(WEB_OPEN_CHECK_MS).toBe(300);
+  });
+
+  it.each([true, false])('a blocked popup (null) is "blocked" at once, mobile %s', async (mobile) => {
+    await expect(webOpenOutcome(null, mobile)).resolves.toBe('blocked');
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  it('desktop web always asks (contract O), without waiting, even when the tab is open', async () => {
+    await expect(webOpenOutcome({ closed: false }, false)).resolves.toBe('ask');
+    expect(jest.getTimerCount()).toBe(0);
+  });
+
+  it('mobile web records only if the tab is still open after WEB_OPEN_CHECK_MS', async () => {
+    const w = { closed: false };
+    let settled: string | null = null;
+    void webOpenOutcome(w, true).then((r) => (settled = r));
+    await jest.advanceTimersByTimeAsync(WEB_OPEN_CHECK_MS - 1);
+    expect(settled).toBeNull(); // not before the check time
+    await jest.advanceTimersByTimeAsync(1);
+    expect(settled).toBe('record');
+  });
+
+  it('mobile web asks when the tab was closed during the wait (Venmo took over, or the browser closed it)', async () => {
+    const w = { closed: false };
+    let settled: string | null = null;
+    void webOpenOutcome(w, true).then((r) => (settled = r));
+    await jest.advanceTimersByTimeAsync(100);
+    w.closed = true;
+    await jest.advanceTimersByTimeAsync(WEB_OPEN_CHECK_MS);
+    expect(settled).toBe('ask');
+  });
+
+  it('mobile web asks when the tab was already closed', async () => {
+    const p = webOpenOutcome({ closed: true }, true);
+    await jest.advanceTimersByTimeAsync(WEB_OPEN_CHECK_MS);
+    await expect(p).resolves.toBe('ask');
+  });
+
+  it('takes a custom wait (test seam) and always settles', async () => {
+    const p = webOpenOutcome({ closed: false }, true, 50);
+    await jest.advanceTimersByTimeAsync(50);
+    await expect(p).resolves.toBe('record');
+  });
+});
+
+describe('closeOpenedTab (review R1)', () => {
+  it('closes the tab', () => {
+    const close = jest.fn();
+    closeOpenedTab({ close });
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+  it('never throws: null, no close(), or a close() that throws', () => {
+    expect(() => closeOpenedTab(null)).not.toThrow();
+    expect(() => closeOpenedTab({})).not.toThrow();
+    expect(() =>
+      closeOpenedTab({
+        close: () => {
+          throw new Error('blocked');
+        },
+      }),
+    ).not.toThrow();
   });
 });

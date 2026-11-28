@@ -7,7 +7,13 @@
 //   landed (`version`) or failed (`finished`, then a "Couldn't refresh" line with a retry).
 // - Every write is guarded by a ref per person, so a double tap sends one call.
 // - No confirms (PI-3, PI-4): an add is undone with Remove, a remove with Add.
-// - This screen never navigates on its own; only Back, and the not-found "Go home", do.
+// - This screen never navigates on its own; only Back, the not-found "Go home", and a payer row's
+//   "Change who paid" (who paid S12: a payer can't be removed, so the row says why and links to the
+//   Who paid page instead of showing Remove) do.
+// - A group bill's people are its group's (docs/specs/2026-11-26-groups-mvp.md A1.8, criterion 111):
+//   after lib/useBillGroup's first read, it says so with "Open <group>" and has no Add or Remove.
+//   (Reached only by a link: the bill screen shows no Add people on a group bill.) If the group
+//   can't be read, it shows the group check line and Try again, and no Add or Remove (GR-T17-17).
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import Plus from 'lucide-react-native/icons/plus';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -16,6 +22,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Avatar } from '@/components/Avatars';
 import { Centered, Loading } from '@/components/Centered';
+import { GroupCheckLine } from '@/components/GroupCheckLine';
 import { PeopleList } from '@/components/PeopleList';
 import { BackHeader } from '@/components/ui/BackHeader';
 import { Banner, BannerText } from '@/components/ui/Banner';
@@ -24,12 +31,14 @@ import { Card } from '@/components/ui/Card';
 import { StatusLine } from '@/components/ui/StatusLine';
 import { defaultTimeFormatters } from '@/lib/activityText';
 import { useSession } from '@/lib/auth';
+import { groupBillText } from '@/lib/billGroup';
 import { initials, makeNameOf } from '@/lib/billView';
 import { addParticipant, BILL_ERROR_COPY, removeParticipant, type BillData } from '@/lib/bills';
 import { addablePeople, personName, type Person } from '@/lib/people';
-import { addedText, onlyHostText, onThisBillRows, PEOPLE_COPY, removedText } from '@/lib/peopleView';
+import { addedText, changeWhoPaidLabel, onlyHostText, onThisBillRows, PEOPLE_COPY, removedText } from '@/lib/peopleView';
 import { layout, ROW_MIN_HEIGHT, space, type, useTheme } from '@/lib/theme';
 import { useBill } from '@/lib/useBill';
+import { knownGroup, useBillGroup } from '@/lib/useBillGroup';
 import { usePeople } from '@/lib/usePeople';
 
 const LOAD_ERROR = "Couldn't load the bill.";
@@ -46,12 +55,14 @@ function AddPeopleScreen({ id, myId }: { id: string; myId: string }) {
   const router = useRouter();
   const { colors } = useTheme();
   const { load, version, finished, refetch } = useBill(id);
+  const billGroup = useBillGroup(id);
+  const group = knownGroup(billGroup.read) ?? null;
   // Back to the bill: pops to it when it's under this screen, otherwise opens it (cold deep link).
   const toBill = useCallback(() => router.dismissTo(`/bills/${id}`), [router, id]);
 
   // The bar is there in every state; the back control only where it always was (the host's view).
   const header = <BackHeader title={PEOPLE_COPY.addPeople} />;
-  if (load.status === 'loading') {
+  if (load.status === 'loading' || billGroup.read.status === 'loading') {
     return (
       <>
         {header}
@@ -73,12 +84,45 @@ function AddPeopleScreen({ id, myId }: { id: string; myId: string }) {
       <Centered>
         {header}
         <Text style={[type.body, styles.centerText, { color: colors.text }]}>{LOAD_ERROR}</Text>
-        <Button label="Try again" variant="primary" onPress={() => refetch()} />
+        <Button
+          label="Try again"
+          variant="primary"
+          onPress={() => {
+            refetch();
+            // The group read failed with the bill's (same server): read it again too.
+            if (billGroup.read.status === 'failed') billGroup.reload();
+          }}
+        />
       </Centered>
     );
   }
 
   const data = load.data;
+  if (billGroup.read.status === 'failed') {
+    return (
+      <Centered>
+        {header}
+        <GroupCheckLine onRetry={() => billGroup.reload()} checking={billGroup.reading} />
+        <Button label={PEOPLE_COPY.backToBill} variant="ghost" onPress={toBill} />
+      </Centered>
+    );
+  }
+  if (group !== null) {
+    const text = groupBillText(group.name);
+    return (
+      <Centered>
+        {header}
+        <Text style={[type.body, styles.centerText, { color: colors.text }]}>{text.peopleFromGroup}</Text>
+        <Button
+          label={text.openGroup}
+          accessibilityHint={text.openGroupHint}
+          variant="primary"
+          onPress={() => router.push(`/groups/${group.groupId}`)}
+        />
+        <Button label={PEOPLE_COPY.backToBill} variant="ghost" onPress={toBill} />
+      </Centered>
+    );
+  }
   if (data.bill.host_id !== myId) {
     const host = data.participants.find((p) => p.userId === data.bill.host_id);
     return (
@@ -112,13 +156,15 @@ type HostProps = {
 };
 
 function HostView({ data, myId, version, finished, refetch }: HostProps) {
+  const router = useRouter();
   const { colors } = useTheme();
   const insets = useSafeAreaInsets();
   const { load: peopleLoad, reload: reloadPeople } = usePeople(myId);
 
   const [busy, setBusy] = useState<ReadonlyMap<string, Busy>>(new Map());
   const [addError, setAddError] = useState<string | null>(null);
-  const [removeError, setRemoveError] = useState<string | null>(null);
+  /** A refused Remove: its copy, and whose row it was (to drop it once that row says why; S12). */
+  const [removeError, setRemoveError] = useState<{ userId: string; text: string } | null>(null);
   const [announcement, setAnnouncement] = useState<string | null>(null);
   const [refreshFailed, setRefreshFailed] = useState(false);
 
@@ -207,13 +253,17 @@ function HostView({ data, myId, version, finished, refetch }: HostProps) {
       return;
     }
     release(userId);
-    setRemoveError(BILL_ERROR_COPY[res.error]);
+    setRemoveError({ userId, text: BILL_ERROR_COPY[res.error] });
     // They may have just claimed something: re-read so "Remove" goes away.
     if (res.error !== 'network') refetch();
   }
 
   const nameOf = useMemo(() => makeNameOf(data.participants, myId), [data.participants, myId]);
   const onBill = useMemo(() => onThisBillRows(data, myId, nameOf), [data, myId, nameOf]);
+  // The re-read after a refused Remove shows they now paid: the row's reason explains it, and the
+  // shared "may have just claimed an item" line would contradict it.
+  const shownRemoveError =
+    removeError === null || onBill.some((r) => r.userId === removeError.userId && r.payerNote !== null) ? null : removeError.text;
   const displayNames = useMemo(() => new Map(data.participants.map((p) => [p.userId, p.displayName])), [data.participants]);
   const all = peopleLoad.status === 'ready' ? peopleLoad.people : null;
   const addable = useMemo(
@@ -299,15 +349,18 @@ function HostView({ data, myId, version, finished, refetch }: HostProps) {
         </Card>
 
         <Card title={PEOPLE_COPY.onThisBill}>
-          {removeError !== null ? (
+          {shownRemoveError !== null ? (
             <Banner tone="error" alert>
-              <BannerText>{removeError}</BannerText>
+              <BannerText>{shownRemoveError}</BannerText>
             </Banner>
           ) : null}
           <View>
             {onBill.map((row, i) => (
-              <View key={row.userId} style={[styles.row, i > 0 && [styles.divider, { borderTopColor: colors.divider }]]}>
-                <View accessible accessibilityLabel={row.a11yLabel} style={styles.info}>
+              <View
+                key={row.userId}
+                style={[styles.row, row.payerNote !== null && styles.rowWraps, i > 0 && [styles.divider, { borderTopColor: colors.divider }]]}
+              >
+                <View accessible accessibilityLabel={row.a11yLabel} style={[styles.info, row.payerNote !== null && styles.infoWraps]}>
                   <Avatar
                     person={{
                       userId: row.userId,
@@ -321,6 +374,9 @@ function HostView({ data, myId, version, finished, refetch }: HostProps) {
                     {row.noItems ? (
                       <Text style={[type.caption, { color: colors.textMuted }]}>{PEOPLE_COPY.noItems}</Text>
                     ) : null}
+                    {row.payerNote !== null ? (
+                      <Text style={[type.caption, { color: colors.textMuted }]}>{row.payerNote}</Text>
+                    ) : null}
                   </View>
                 </View>
                 {row.removable || busy.get(row.userId)?.kind === 'remove' ? (
@@ -333,6 +389,15 @@ function HostView({ data, myId, version, finished, refetch }: HostProps) {
                     // Their add may still be waiting for its refetch (a live update moved them here first).
                     disabled={busy.has(row.userId)}
                     onPress={() => void onRemove(row.userId, row.name)}
+                  />
+                ) : row.payerNote !== null ? (
+                  <Button
+                    label={PEOPLE_COPY.changeWhoPaid}
+                    accessibilityLabel={changeWhoPaidLabel(row.name)}
+                    accessibilityHint={PEOPLE_COPY.changeWhoPaidHint}
+                    variant="ghost"
+                    onPress={() => router.push(`/bills/${data.bill.id}/payers`)}
+                    style={styles.rowAction}
                   />
                 ) : null}
               </View>
@@ -354,5 +419,10 @@ const styles = StyleSheet.create({
   row: { flexDirection: 'row', alignItems: 'center', gap: space.md, paddingVertical: space.sm, minHeight: ROW_MIN_HEIGHT },
   divider: { borderTopWidth: StyleSheet.hairlineWidth },
   info: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: space.md },
+  // A payer row's reason and "Change who paid" are wider than Remove: on a narrow screen (or large
+  // text) the button drops under the row instead of squeezing the reason into a sliver.
+  rowWraps: { flexWrap: 'wrap', rowGap: space.xs },
+  infoWraps: { flexBasis: 200, flexGrow: 1, flexShrink: 1 },
+  rowAction: { marginLeft: 'auto' },
   centerText: { textAlign: 'center', maxWidth: layout.message },
 });

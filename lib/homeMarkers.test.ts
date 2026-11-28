@@ -1,5 +1,9 @@
-// Spec: docs/specs/2026-11-24-bill-markers-and-notices.md D4 (K1, K2), criteria 17–20.
+// Spec: docs/specs/2026-11-24-bill-markers-and-notices.md D4 (K1, K2), criteria 17–20; and
+// docs/specs/2026-11-26-sent-via-venmo.md D7 (Task 7, criteria 29 and 58).
+import { fakeMark, fakeNotReceived } from '@/test-utils/fakes';
+
 import type { BillSummary } from './bills';
+import type { NameOf } from './billView';
 import {
   ADDED_NOTICE_DISMISS_HINT_MANY,
   ADDED_NOTICE_DISMISS_HINT_ONE,
@@ -15,14 +19,27 @@ import {
   noticeBillIds,
   billMarkerView,
   settleCandidateIds,
+  sentFacts,
   stillDismissed,
   type BillMarker,
   type HomeMarker,
   type MarkerTone,
   type MarkerView,
 } from './homeMarkers';
-import { settlePlan, type SettleMarks, type SettlePlanWithEarly } from './settle';
+import type { PaymentMethod } from './paymentMethods';
+import type { Payer } from './payers';
+import {
+  balanceFor,
+  ledgerSettlePlan,
+  settlePlan,
+  type BillSettlePlan,
+  type SettleLedgerFlag,
+  type SettleMark,
+  type SettleNotReceivedMap,
+  type SettlePlanWithEarly,
+} from './settle';
 import type { ExtrasMode, SplitClaim, SplitInput, SplitItem } from './split';
+import type { Payment } from './transfers';
 
 const ME = 'bbbbbbbb-0000-4000-8000-00000000000b';
 const HOST = 'bbbbbbbb-0000-4000-8000-00000000000a';
@@ -46,6 +63,7 @@ function summary(over: Partial<BillSummary> = {}): BillSummary {
     seen: false,
     claimedAny: false,
     complete: false,
+    seenAt: null,
     ...over,
   };
 }
@@ -271,12 +289,30 @@ describe('stillDismissed (keys are bill id + joinedAt, R2)', () => {
 
 const DEE = OTHER;
 const AT = '2026-11-25T10:00:00Z';
-const mark = (cents: number) => ({ cents, at: AT });
+/**
+ * A mark as a test writes it. `toUserId` defaults to the plan's payer (planOf fills it in), the way
+ * lib/bills.ts fills it from bills.payer_id at parse time.
+ */
+type TestMark = Omit<SettleMark, 'toUserId'> & { toUserId?: string };
+const mark = (cents: number, over: { method?: PaymentMethod; at?: string; toUserId?: string } = {}): TestMark => ({
+  cents,
+  at: over.at ?? AT,
+  method: over.method ?? 'other',
+  ...(over.toUserId === undefined ? {} : { toUserId: over.toUserId }),
+});
 const cl = (itemId: string, userId: string, parts = 1): SplitClaim => ({ itemId, userId, parts });
 const nameOf = (id: string | null) => (id === ME ? 'You' : id === HOST ? 'Hana' : id === DEE ? 'Dee' : 'Someone');
 
-function planOf(input: SplitInput, payerId: string, marks: SettleMarks = {}): SettlePlanWithEarly {
-  return settlePlan(input, payerId, marks, { allowEarly: true });
+function planOf(
+  input: SplitInput,
+  payerId: string,
+  marks: Readonly<Record<string, TestMark | undefined>> = {},
+  notReceived: SettleNotReceivedMap = {},
+): SettlePlanWithEarly {
+  const full = Object.fromEntries(
+    Object.entries(marks).map(([u, m]) => [u, m && fakeMark(m.cents, m.at, m.toUserId ?? payerId, m.method)]),
+  );
+  return settlePlan(input, payerId, full, { allowEarly: true, notReceived });
 }
 function input(items: SplitItem[], claims: SplitClaim[], totalCents: number, extrasMode: ExtrasMode = 'proportional'): SplitInput {
   return { totalCents, items, claims, participantIds: [HOST, ME, DEE], extrasMode };
@@ -312,9 +348,9 @@ const guestBill = (over: Partial<BillSummary> = {}) => summary({ seen: true, cla
 /** A bill I host and pay. */
 const myBill = (over: Partial<BillSummary> = {}) => summary({ hostId: ME, payerId: ME, seen: true, complete: true, ...over });
 
-function view(bill: BillSummary, plan: SettlePlanWithEarly | null): MarkerView | null {
+function view(bill: BillSummary, plan: SettlePlanWithEarly | null, names: NameOf = nameOf): MarkerView | null {
   const marker = billMarker(bill, ME, plan);
-  return marker === null ? null : billMarkerView(marker, { plan, viewerId: ME, nameOf });
+  return marker === null ? null : billMarkerView(marker, { plan, viewerId: ME, nameOf: names, summary: bill });
 }
 
 const VIEWS_SEEN: MarkerView[] = [];
@@ -359,8 +395,8 @@ describe('settle markers H1–H7 (criterion 35)', () => {
 
   it('H4 ready: my share went down, Hana owes me some back', () => {
     expectView(guestBill(), planOf(exact(1400), HOST, { [ME]: mark(1510) }), 'paid_back_due', {
-      pill: 'Paid · $1.10 back to you',
-      a11y: 'Paid, Hana owes you $1.10 back',
+      pill: 'You are owed $1.10',
+      a11y: 'You are owed $1.10: Hana owes you $1.10 back',
       tone: 'muted',
       icon: null,
     });
@@ -369,8 +405,8 @@ describe('settle markers H1–H7 (criterion 35)', () => {
   it('H4 ready: my share is now $0, so all of it comes back', () => {
     const plan = planOf(input([{ id: 'h', totalCents: 1000 }], [cl('h', HOST)], 1000), HOST, { [ME]: mark(1510) });
     expectView(guestBill({ claimedAny: false }), plan, 'paid_back_due', {
-      pill: 'Paid · $15.10 back to you',
-      a11y: 'Paid, Hana owes you $15.10 back',
+      pill: 'You are owed $15.10',
+      a11y: 'You are owed $15.10: Hana owes you $15.10 back',
       tone: 'muted',
       icon: null,
     });
@@ -419,7 +455,7 @@ describe('settle markers H1–H7 (criterion 35)', () => {
   it('H7: everyone has paid and nothing is left to settle', () => {
     expectView(myBill(), planOf(iPay(500, 300), ME, { [HOST]: mark(500), [DEE]: mark(301) }), 'settled', {
       pill: 'Settled up',
-      a11y: 'Settled up, everyone has paid you',
+      a11y: 'Settled up, everyone has settled up with you',
       tone: 'muted',
       icon: 'check',
     });
@@ -433,13 +469,14 @@ describe('settle markers H1–H7 (criterion 35)', () => {
     // Negative share, unmarked (even mode: items 1000 / 0, total 800 → me -100).
     const negative = input([{ id: 'h', totalCents: 1000 }, { id: 'm', totalCents: 0 }], [cl('h', HOST), cl('m', ME)], 800, 'equal');
     expect(billMarker(guestBill(), ME, planOf(negative, HOST))).toBeNull();
-    // Blocked even-mode bill, blocked_all_zero, bad payer.
+    // Blocked even-mode bill, blocked_all_zero, bad payer: no settle marker. A guest with claims gets
+    // 'waiting_on_others' there instead (sent-via-Venmo D7, criterion 58; tested below).
     const evenIncomplete = { ...exact(1510, 0, { unclaimed: 500 }), extrasMode: 'equal' as const };
     expect(planOf(evenIncomplete, HOST).status).toBe('blocked');
-    expect(billMarker(guestBill({ complete: false }), ME, planOf(evenIncomplete, HOST))).toBeNull();
+    expect(billMarker(guestBill({ complete: false }), ME, planOf(evenIncomplete, HOST))).toBe('waiting_on_others');
     const zero = input([{ id: 'h', totalCents: 0 }, { id: 'm', totalCents: 0 }], [cl('h', HOST), cl('m', ME)], 500);
     expect(planOf(zero, HOST).status).toBe('blocked_all_zero');
-    expect(billMarker(guestBill(), ME, planOf(zero, HOST))).toBeNull();
+    expect(billMarker(guestBill(), ME, planOf(zero, HOST))).toBe('waiting_on_others');
     expect(billMarker(guestBill(), ME, { status: 'blocked_bad_payer' })).toBeNull();
   });
 
@@ -453,7 +490,7 @@ describe('settle markers H1–H7 (criterion 35)', () => {
     for (let i = 0; i < 300; i++) {
       const hana = 1 + next(2000);
       const dee = next(3) === 0 ? 0 : 1 + next(2000);
-      const marks: Record<string, { cents: number; at: string }> = {};
+      const marks: Record<string, TestMark> = {};
       for (const [u, share] of [[HOST, hana], [DEE, dee]] as const) {
         const roll = next(4);
         if (roll === 1) marks[u] = mark(Math.max(1, share));
@@ -558,7 +595,7 @@ describe('settle markers in early plans (criterion 37)', () => {
     expect(billMarker(guestBill({ complete: false }), ME, plan)).toBeNull();
   });
 
-  it('the payer in early → no marker, even with marks', () => {
+  it('the payer in early → no marker when every mark is seen (HM-4 still holds without sent)', () => {
     const plan = planOf(
       input([{ id: 'm', totalCents: 1000 }, { id: 'h', totalCents: 500 }, { id: 'u', totalCents: 300 }], [cl('m', ME), cl('h', HOST)], 1800),
       ME,
@@ -586,19 +623,19 @@ describe('billMarkerView', () => {
     expect(billMarkerView('settled', { plan: owes, viewerId: ME, nameOf })).toBeNull();
   });
 
-  it('copy with "You": names come from nameOf, and only H1 says "You"', () => {
+  it('copy with "You": names come from nameOf, and only H1 and H4 say "You"', () => {
     for (const v of VIEWS_SEEN) {
-      if (v.pill.startsWith('You owe')) continue;
+      if (v.pill.startsWith('You owe') || v.pill.startsWith('You are owed')) continue;
       expect(v.pill).not.toMatch(/\bYou\b/);
     }
     // H4 names the payer, never the viewer's "You".
     const v = view(guestBill(), planOf(exact(1400), HOST, { [ME]: mark(1510) }));
-    expect(v?.a11y).toBe('Paid, Hana owes you $1.10 back');
+    expect(v?.a11y).toBe('You are owed $1.10: Hana owes you $1.10 back');
   });
 
   it('a blank payer name falls back the way nameOf says (no special casing here)', () => {
     const v = billMarkerView('paid_back_due', { plan: planOf(exact(1400), HOST, { [ME]: mark(1510) }), viewerId: ME, nameOf: () => 'A friend' });
-    expect(v?.a11y).toBe('Paid, A friend owes you $1.10 back');
+    expect(v?.a11y).toBe('You are owed $1.10: A friend owes you $1.10 back');
   });
 
   it('tone is only accent or muted, icon only check or null; no glyphs (criteria 64, 66)', () => {
@@ -632,8 +669,8 @@ describe('billRowA11yLabel with settle data', () => {
   });
 });
 
-describe('settleCandidateIds (criterion 63)', () => {
-  it('skips new, unclaimed and payer-incomplete bills; keeps the rest in list order', () => {
+describe('settleCandidateIds (criterion 63; HM-4 skip removed by sent-via-Venmo D7)', () => {
+  it('skips new and unclaimed bills; keeps the rest in list order, payer-incomplete bills included', () => {
     const fresh = summary({ added: true, seen: false });
     const unclaimed = summary({ seen: true, claimedAny: false, complete: false });
     const payerIncomplete = summary({ payerId: ME, seen: true, claimedAny: true, complete: false });
@@ -645,7 +682,8 @@ describe('settleCandidateIds (criterion 63)', () => {
       [owesComplete, fresh, hostPayerComplete, unclaimed, payerIncomplete, owesIncomplete, hostPayerIncomplete],
       ME,
     );
-    expect(ids).toEqual([owesComplete.id, hostPayerComplete.id, owesIncomplete.id]);
+    // payerIncomplete and hostPayerIncomplete are now read, so `sent` can show on early payer bills.
+    expect(ids).toEqual([owesComplete.id, hostPayerComplete.id, payerIncomplete.id, owesIncomplete.id, hostPayerIncomplete.id]);
   });
 
   it('includes a complete bill I host but someone else pays, and an incomplete one I host and owe on', () => {
@@ -664,8 +702,698 @@ describe('settleCandidateIds (criterion 63)', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Sent via Venmo (docs/specs/2026-11-26-sent-via-venmo.md D7, Task 7; criteria 29 and 58)
+// ---------------------------------------------------------------------------
+
+const EVE = 'bbbbbbbb-0000-4000-8000-00000000000d';
+const names = (id: string | null) => (id === EVE ? 'Eve' : nameOf(id));
+/** I pay: me 1000, Hana `hana`, Dee `dee`, Eve `eve`, no extras (four people, so two can send while one still owes). */
+function iPay3(hana: number, dee: number, eve: number): SplitInput {
+  return {
+    totalCents: 1000 + hana + dee + eve,
+    items: [{ id: 'm', totalCents: 1000 }, { id: 'h', totalCents: hana }, { id: 'd', totalCents: dee }, { id: 'e', totalCents: eve }],
+    claims: [cl('m', ME), cl('h', HOST), cl('d', DEE), cl('e', EVE)],
+    participantIds: [HOST, ME, DEE, EVE],
+    extrasMode: 'proportional',
+  };
+}
+/** I pay, bill not complete (a 200 row is unclaimed): early, Hana 500, Dee 300. */
+const EARLY_PAY = input(
+  [{ id: 'm', totalCents: 1000 }, { id: 'h', totalCents: 500 }, { id: 'd', totalCents: 300 }, { id: 'u', totalCents: 200 }],
+  [cl('m', ME), cl('h', HOST), cl('d', DEE)],
+  2000,
+);
+/** A bill I host and pay that I haven't opened since it was made (no bill_seen row). */
+const unseenBill = (over: Partial<BillSummary> = {}) => myBill({ seen: false, seenAt: null, ...over });
+const LATER = '2026-11-25T11:00:00Z';
+
+/** Fails the test if billMarker / billMarkerView / sentFacts read the clock (no age-off, U-A1.5). */
+function noClock<T>(fn: () => T): T {
+  const spy = jest.spyOn(Date, 'now').mockImplementation(() => {
+    throw new Error('Home markers must not read the clock');
+  });
+  try {
+    return fn();
+  } finally {
+    spy.mockRestore();
+  }
+}
+
+type Entry = { userId: string; role: string; mark: unknown };
+function entriesOf(plan: SettlePlanWithEarly): readonly Entry[] {
+  return plan.status === 'ready' || plan.status === 'early' ? plan.people : [];
+}
+
+const SENT_PLANS: SettlePlanWithEarly[] = [];
+function expectSent(bill: BillSummary, plan: SettlePlanWithEarly, expected: MarkerView) {
+  noClock(() => {
+    expect(billMarker(bill, ME, plan)).toBe('sent');
+    expect(view(bill, plan, names)).toEqual(expected);
+  });
+  SENT_PLANS.push(plan);
+}
+/** The marker isn't 'sent'. `noSenders`: nobody even counts as a sender (sentFacts null). */
+function expectNotSent(bill: BillSummary, plan: SettlePlanWithEarly, marker: HomeMarker | null, noSenders = true) {
+  noClock(() => {
+    expect(billMarker(bill, ME, plan)).toBe(marker);
+    if (noSenders) expect(sentFacts(bill, plan, ME, names)).toBeNull();
+    else expect(sentFacts(bill, plan, ME, names)).not.toBeNull();
+  });
+}
+const sentView = (pill: string, a11y = pill): MarkerView => ({ pill, a11y, tone: 'muted', icon: null });
+
+describe('sent: the payer sees unseen sends (criterion 29, S1–S15)', () => {
+  const oneSent = (method: PaymentMethod, at = AT) => planOf(iPay(500, 300), ME, { [HOST]: mark(500, { method, at }) });
+
+  it('S1 unseen (seenAt null and seen false): one Venmo send while Dee still owes', () => {
+    expectSent(unseenBill(), oneSent('venmo'), sentView('Hana sent you $5.00', 'Hana sent you $5.00 on Venmo'));
+  });
+
+  it('S2 seen after the mark → left_to_pay', () => {
+    expectNotSent(unseenBill({ seen: true, seenAt: '2026-11-25T10:00:01Z' }), oneSent('venmo'), 'left_to_pay');
+  });
+
+  it('S3 seenAt null but seen true → not a sender', () => {
+    expectNotSent(unseenBill({ seen: true, seenAt: null }), oneSent('venmo'), 'left_to_pay');
+  });
+
+  it.each(['2026-11-25T10:00:00.000Z', '2026-11-25T10:00:00+00:00', '2026-11-25T15:30:00+05:30'])(
+    'S4 a mark exactly at seenAt (%s, same instant, other spelling) → not a sender (strict >)',
+    (seenAt) => {
+      expectNotSent(unseenBill({ seen: true, seenAt }), oneSent('venmo'), 'left_to_pay');
+    },
+  );
+
+  it('S5 1 ms after seenAt → a sender', () => {
+    expectSent(unseenBill({ seen: true, seenAt: '2026-11-25T09:59:59.999Z' }), oneSent('venmo'), sentView('Hana sent you $5.00', 'Hana sent you $5.00 on Venmo'));
+  });
+
+  it('S6 two senders → "2 people sent you money", a11y newest first; one seen → the other alone', () => {
+    const plan = planOf(iPay3(500, 300, 200), ME, {
+      [HOST]: mark(500, { method: 'venmo', at: AT }),
+      [DEE]: mark(1200, { method: 'cash', at: LATER }),
+    });
+    expectSent(unseenBill(), plan, sentView('2 people sent you money', '2 people sent you money: Dee $12.00, Hana $5.00'));
+    expectSent(unseenBill({ seen: true, seenAt: '2026-11-25T10:30:00Z' }), plan, sentView('Dee paid you $12.00 in cash'));
+  });
+
+  it('S7 cash → "paid you … in cash"', () => {
+    expectSent(unseenBill(), oneSent('cash'), sentView('Hana paid you $5.00 in cash'));
+  });
+
+  it('S8 other → "paid you", a11y "says they paid you"', () => {
+    expectSent(unseenBill(), oneSent('other'), sentView('Hana paid you $5.00', 'Hana says they paid you $5.00'));
+  });
+
+  it('S9 the viewer is not the payer → no sent (others\' marks to Hana are not mine)', () => {
+    const plan = planOf(exact(1510, 300), HOST, { [DEE]: mark(300, { method: 'venmo' }) });
+    expectNotSent(guestBill({ seen: false, seenAt: null }), plan, 'owes');
+  });
+
+  it('S9 a mark to someone else (a former payer) on my bill → not a sender', () => {
+    const plan = planOf(iPay(500, 300), ME, { [HOST]: mark(500, { method: 'venmo', toUserId: DEE }) });
+    expectNotSent(unseenBill(), plan, 'left_to_pay');
+  });
+
+  it('S9 my own entry is never a sender', () => {
+    const plan = planOf(iPay(500, 300), ME, { [ME]: mark(1000, { method: 'venmo' }) });
+    expectNotSent(unseenBill(), plan, 'left_to_pay');
+  });
+
+  it('S10 differences wins (every ower marked, one off)', () => {
+    const plan = planOf(iPay(500, 300), ME, { [HOST]: mark(400, { method: 'venmo' }), [DEE]: mark(300, { method: 'venmo' }) });
+    expectNotSent(unseenBill(), plan, 'differences', false);
+  });
+
+  it('S11 new wins (I pay, Hana hosts and added me)', () => {
+    const bill = summary({ hostId: HOST, payerId: ME, added: true, seen: false, seenAt: null, claimedAny: true, complete: true });
+    expect(noClock(() => billMarker(bill, ME, oneSent('venmo')))).toBe('new');
+  });
+
+  it('S12 early payer bill with an unmarked ower → sent; with nobody left owing, or nothing unseen → null', () => {
+    const one = planOf(EARLY_PAY, ME, { [HOST]: mark(500, { method: 'venmo' }) });
+    expect(one.status).toBe('early');
+    expectSent(unseenBill({ complete: false }), one, sentView('Hana sent you $5.00', 'Hana sent you $5.00 on Venmo'));
+    const both = planOf(EARLY_PAY, ME, { [HOST]: mark(500, { method: 'venmo' }), [DEE]: mark(300, { method: 'venmo' }) });
+    expectNotSent(unseenBill({ complete: false }), both, null, false);
+    expectNotSent(unseenBill({ complete: false, seen: true, seenAt: LATER }), one, null);
+  });
+
+  it("S13 the last ower's unseen mark makes nobody owe → settled, not sent", () => {
+    const plan = planOf(iPay(500, 300), ME, { [HOST]: mark(500, { method: 'venmo' }), [DEE]: mark(300, { method: 'venmo' }) });
+    expectNotSent(unseenBill(), plan, 'settled', false);
+    expect(view(unseenBill(), plan, names)).toEqual({ pill: 'Settled up', a11y: 'Settled up, everyone has settled up with you', tone: 'muted', icon: 'check' });
+  });
+
+  it('S14 a cleared mark (Not received) is not a sender', () => {
+    const plan = planOf(iPay(500, 300), ME, {}, { [HOST]: fakeNotReceived(500, ME) });
+    expectNotSent(unseenBill(), plan, 'left_to_pay');
+  });
+
+  it('S15 blank name → "Someone"', () => {
+    const blank = (id: string | null) => (id === HOST ? '  ' : names(id));
+    const bill = unseenBill();
+    const plan = oneSent('venmo');
+    expect(view(bill, plan, blank)).toEqual(sentView('Someone sent you $5.00', 'Someone sent you $5.00 on Venmo'));
+    expect(view(bill, oneSent('cash'), blank)?.pill).toBe('Someone paid you $5.00 in cash');
+  });
+
+  it('copy at a count of 1 never says "1 people", and never says "You"', () => {
+    const v = view(unseenBill(), oneSent('venmo'), names);
+    expect(v?.pill).not.toMatch(/\b1 (people|person)\b/);
+    for (const p of [v?.pill, v?.a11y]) expect(p).not.toMatch(/\bYou\b/);
+  });
+
+  it('billMarkerView("sent") needs the summary and a plan that gives sent (never a guessed pill)', () => {
+    const plan = oneSent('venmo');
+    expect(billMarkerView('sent', { plan, viewerId: ME, nameOf: names })).toBeNull();
+    expect(billMarkerView('sent', { plan, viewerId: ME, nameOf: names, summary: unseenBill({ seen: true, seenAt: LATER }) })).toBeNull();
+    expect(billMarkerView('sent', { plan: null, viewerId: ME, nameOf: names, summary: unseenBill() })).toBeNull();
+  });
+
+  it('billRowA11yLabel appends the sent words', () => {
+    expect(billRowA11yLabel(unseenBill(), ME, fmt, { plan: oneSent('venmo'), nameOf: names })).toBe(
+      'Your bill · Nov 20 · $44.80. Hana sent you $5.00 on Venmo',
+    );
+  });
+
+  it('criterion 58: every sent fixture has someone still owing the payer', () => {
+    expect(SENT_PLANS.length).toBeGreaterThanOrEqual(7);
+    for (const plan of SENT_PLANS) {
+      expect(entriesOf(plan).some((e) => e.userId !== ME && e.role === 'owes' && e.mark === null)).toBe(true);
+    }
+  });
+});
+
+describe('sentFacts (D7)', () => {
+  it('lists senders newest first with names, cents, method and time', () => {
+    const bill = unseenBill();
+    const plan = planOf(iPay3(500, 300, 200), ME, {
+      [HOST]: mark(500, { method: 'venmo', at: AT }),
+      [DEE]: mark(300, { method: 'other', at: LATER }),
+    });
+    expect(noClock(() => sentFacts(bill, plan, ME, names))).toEqual({
+      billId: bill.id,
+      senders: [
+        { userId: DEE, name: 'Dee', cents: 300, method: 'other', at: LATER },
+        { userId: HOST, name: 'Hana', cents: 500, method: 'venmo', at: AT },
+      ],
+      newestAt: LATER,
+    });
+  });
+
+  it('null with no senders, on a blocked plan, and for the viewer\'s own mark', () => {
+    expect(sentFacts(unseenBill(), planOf(iPay(500, 300), ME), ME, names)).toBeNull();
+    expect(sentFacts(unseenBill(), { status: 'blocked_all_zero' }, ME, names)).toBeNull();
+  });
+
+  it('two sends at the same instant keep plan order', () => {
+    const plan = planOf(iPay3(500, 300, 200), ME, { [HOST]: mark(500, { method: 'venmo' }), [DEE]: mark(300, { method: 'venmo' }) });
+    expect(sentFacts(unseenBill(), plan, ME, names)?.senders.map((s) => s.userId)).toEqual([HOST, DEE]);
+  });
+});
+
+const NOT_RECEIVED_PLANS: SettlePlanWithEarly[] = [];
+function expectNotReceived(bill: BillSummary, plan: SettlePlanWithEarly, expected: MarkerView) {
+  noClock(() => {
+    expect(billMarker(bill, ME, plan)).toBe('not_received');
+    expect(view(bill, plan)).toEqual(expected);
+  });
+  NOT_RECEIVED_PLANS.push(plan);
+}
+
+describe('not_received: the ower whose mark the payer cleared (criterion 29, S16)', () => {
+  const flag = (toUserId = HOST, method: PaymentMethod = 'venmo') => ({ [ME]: fakeNotReceived(1510, toUserId, method) });
+  const nr: MarkerView = { pill: 'Not received · $15.10', a11y: "Hana hasn't received your $15.10", tone: 'accent', icon: null };
+
+  it("unmarked, owes, and the flag names the current payer → 'Not received · $15.10'", () => {
+    expectNotReceived(guestBill(), planOf(exact(1510), HOST, {}, flag()), nr);
+  });
+
+  it('the pill shows the flag amount for every method (cash, other)', () => {
+    expectNotReceived(guestBill(), planOf(exact(1510), HOST, {}, flag(HOST, 'cash')), nr);
+    expectNotReceived(guestBill(), planOf(exact(1510), HOST, {}, flag(HOST, 'other')), nr);
+  });
+
+  it('early plan, can settle → not_received', () => {
+    expectNotReceived(guestBill({ complete: false }), planOf(exact(1510, 0, { unclaimed: 500 }), HOST, {}, flag()), nr);
+  });
+
+  it('re-marked → paid, not not_received', () => {
+    expect(billMarker(guestBill(), ME, planOf(exact(1510), HOST, { [ME]: mark(1510, { method: 'venmo' }) }, flag()))).toBe('paid');
+  });
+
+  it('the flag names a former payer → owes', () => {
+    expect(billMarker(guestBill(), ME, planOf(exact(1510), HOST, {}, flag(DEE)))).toBe('owes');
+    expect(billMarkerView('not_received', { plan: planOf(exact(1510), HOST, {}, flag(DEE)), viewerId: ME, nameOf })).toBeNull();
+  });
+
+  it('my share is now $0 (role nothing) → no marker', () => {
+    expect(billMarker(guestBill(), ME, planOf(exact(0), HOST, {}, flag()))).toBeNull();
+  });
+
+  it('new and unclaimed win', () => {
+    const plan = planOf(exact(1510), HOST, {}, flag());
+    expect(billMarker(guestBill({ added: true, seen: false }), ME, plan)).toBe('new');
+    expect(billMarker(guestBill({ claimedAny: false, complete: false }), ME, plan)).toBe('unclaimed');
+  });
+
+  it('copy never says "You" for the viewer', () => {
+    const v = view(guestBill(), planOf(exact(1510), HOST, {}, flag()));
+    for (const p of [v?.pill, v?.a11y]) expect(p).not.toMatch(/\bYou\b/);
+  });
+
+  it('criterion 58: every not_received fixture has the viewer unmarked with role owes', () => {
+    expect(NOT_RECEIVED_PLANS.length).toBeGreaterThanOrEqual(4);
+    for (const plan of NOT_RECEIVED_PLANS) {
+      const me = entriesOf(plan).find((e) => e.userId === ME);
+      expect(me?.role).toBe('owes');
+      expect(me?.mark).toBeNull();
+    }
+  });
+});
+
+describe("the ower's own pills by method (criterion 29)", () => {
+  const paidPlan = (method: PaymentMethod) => planOf(exact(1510), HOST, { [ME]: mark(1510, { method }) });
+
+  it.each([
+    ['venmo', 'Sent $15.10'],
+    ['cash', 'Paid $15.10 in cash'],
+    ['other', 'Paid $15.10'],
+  ] as const)('paid, %s → %s', (method, text) => {
+    expectView(guestBill(), paidPlan(method), 'paid', { pill: text, a11y: text, tone: 'muted', icon: 'check' });
+  });
+
+  it('early paid by Venmo → Sent', () => {
+    expectView(guestBill({ complete: false }), planOf(exact(1510, 0, { unclaimed: 500 }), HOST, { [ME]: mark(1510, { method: 'venmo' }) }), 'paid', {
+      pill: 'Sent $15.10',
+      a11y: 'Sent $15.10',
+      tone: 'muted',
+      icon: 'check',
+    });
+  });
+
+  it('more to pay: Venmo says Sent, cash and other keep Paid', () => {
+    const more = (method: PaymentMethod) => planOf(exact(1620), HOST, { [ME]: mark(1510, { method }) });
+    expectView(guestBill(), more('venmo'), 'paid_more', { pill: 'Sent · $1.10 more to pay', a11y: 'Sent, you owe $1.10 more', tone: 'accent', icon: null });
+    expectView(guestBill(), more('cash'), 'paid_more', { pill: 'Paid · $1.10 more to pay', a11y: 'Paid, you owe $1.10 more', tone: 'accent', icon: null });
+  });
+
+  it('back to you: the same "You are owed" for Venmo and cash', () => {
+    const back = (method: PaymentMethod) => planOf(exact(1400), HOST, { [ME]: mark(1510, { method }) });
+    expectView(guestBill(), back('venmo'), 'paid_back_due', {
+      pill: 'You are owed $1.10',
+      a11y: 'You are owed $1.10: Hana owes you $1.10 back',
+      tone: 'muted',
+      icon: null,
+    });
+    expect(view(guestBill(), back('cash'))?.pill).toBe('You are owed $1.10');
+  });
+});
+
+describe('waiting_on_others (criterion 58, groups v2 D-1)', () => {
+  const evenIncomplete = { ...exact(1510, 0, { unclaimed: 500 }), extrasMode: 'equal' as const };
+  const zero = input([{ id: 'h', totalCents: 0 }, { id: 'm', totalCents: 0 }], [cl('h', HOST), cl('m', ME)], 500);
+  const woo: MarkerView = { pill: 'Claimed · not ready to pay', a11y: "You've claimed. You can pay once the bill is ready", tone: 'muted', icon: null };
+
+  it('a guest with claims on a blocked plan, and on a blocked_all_zero plan', () => {
+    expectView(guestBill({ complete: false }), planOf(evenIncomplete, HOST), 'waiting_on_others', woo);
+    expect(planOf(zero, HOST).status).toBe('blocked_all_zero');
+    expectView(guestBill(), planOf(zero, HOST), 'waiting_on_others', woo);
+  });
+
+  it('a host who is not the payer and has claimed gets it too (the rule names the payer, not the host)', () => {
+    const bill = summary({ hostId: ME, payerId: HOST, seen: true, claimedAny: true, complete: false });
+    expect(billMarker(bill, ME, planOf(evenIncomplete, HOST))).toBe('waiting_on_others');
+  });
+
+  it("not when nothing's claimed (unclaimed, or null when complete)", () => {
+    expect(billMarker(guestBill({ claimedAny: false, complete: false }), ME, planOf(evenIncomplete, HOST))).toBe('unclaimed');
+    expect(billMarker(guestBill({ claimedAny: false }), ME, planOf(zero, HOST))).toBeNull();
+  });
+
+  it('not for the payer', () => {
+    expect(billMarker(myBill({ complete: false, claimedAny: true }), ME, planOf(evenIncomplete, ME))).toBeNull();
+    expect(billMarker(summary({ payerId: ME, seen: true, claimedAny: true, complete: false }), ME, planOf(evenIncomplete, ME))).toBeNull();
+  });
+
+  it('not without a plan, nor on bad payer, ready or early plans', () => {
+    expect(billMarker(guestBill({ complete: false }), ME)).toBeNull();
+    expect(billMarker(guestBill({ complete: false }), ME, null)).toBeNull();
+    expect(billMarker(guestBill(), ME, { status: 'blocked_bad_payer' })).toBeNull();
+    expect(billMarker(guestBill(), ME, planOf(exact(1510), HOST))).toBe('owes');
+    expect(billMarker(guestBill({ complete: false }), ME, planOf(exact(0, 0, { unclaimed: 500 }), HOST))).toBeNull(); // early, $0
+  });
+
+  it('billMarkerView gives no pill on a plan that is not blocked', () => {
+    expect(billMarkerView('waiting_on_others', { plan: planOf(exact(1510), HOST), viewerId: ME, nameOf })).toBeNull();
+    expect(billMarkerView('waiting_on_others', { plan: null, viewerId: ME, nameOf })).toBeNull();
+  });
+});
+
 // Type-level checks (criterion 64): the narrow overload keeps Home's existing BILL_MARKER_COPY lookup valid.
 const narrow: BillMarker | null = billMarker(summary(), ME);
 const wide: HomeMarker | null = billMarker(summary(), ME, null);
 void narrow;
 void wide;
+
+// ---------------------------------------------------------------------------
+// Who paid (docs/specs/2026-11-26-who-paid.md D9 last bullet, A1.2 contract O, A1.5; Task 8):
+// markers on 'routes' plans (several payers, or money that moved between other people) and on
+// 'blocked_payers' (a split that no longer adds up). Plans come from ledgerSettlePlan, the same
+// plan the Settle screen reads. ME's id sorts after HOST's and before DEE's and EVE's.
+// ---------------------------------------------------------------------------
+
+const PEOPLE4 = [HOST, ME, DEE, EVE];
+/** Everyone's display name as `viewer` sees it. */
+const namesFor =
+  (viewer: string): NameOf =>
+  (id) =>
+    id === viewer ? 'You' : id === HOST ? 'Hana' : id === ME ? 'Mo' : id === DEE ? 'Dee' : id === EVE ? 'Eve' : 'Someone';
+/** One exact row per person with a share > 0 (no extras), plus an unclaimed row when asked. */
+function sharesInput(shares: Readonly<Record<string, number>>, opts: { unclaimed?: number } = {}): SplitInput {
+  const ids = Object.keys(shares);
+  const items: SplitItem[] = ids.filter((id) => (shares[id] ?? 0) > 0).map((id) => ({ id: `i-${id}`, totalCents: shares[id] ?? 0 }));
+  const claims = ids.filter((id) => (shares[id] ?? 0) > 0).map((id) => cl(`i-${id}`, id));
+  if (opts.unclaimed !== undefined) items.push({ id: 'u', totalCents: opts.unclaimed });
+  return { totalCents: items.reduce((s, i) => s + i.totalCents, 0), items, claims, participantIds: ids, extrasMode: 'proportional' };
+}
+let payN = 0;
+function pay(fromId: string, toId: string, cents: number, planKey: string | null, method: PaymentMethod = 'venmo', at = AT): Payment {
+  payN += 1;
+  return { id: `00000000-0000-4000-8000-${String(payN).padStart(12, '0')}`, fromId, toId, cents, method, planKey, at };
+}
+type LedgerOpts = { payerId: string; payers?: Payer[]; payments?: Payment[]; flags?: SettleLedgerFlag[]; allowEarly?: boolean; input?: SplitInput };
+function ledgerPlan(shares: Readonly<Record<string, number>>, o: LedgerOpts): BillSettlePlan {
+  const inp = o.input ?? sharesInput(shares);
+  return ledgerSettlePlan(inp, { payerId: o.payerId, payers: o.payers ?? [], payments: o.payments ?? [], flags: o.flags ?? [] }, { allowEarly: o.allowEarly ?? true }).plan;
+}
+function keyOf(plan: BillSettlePlan): string {
+  if (plan.status !== 'routes') throw new Error(`expected routes, got ${plan.status}`);
+  return plan.key;
+}
+function viewAs(viewer: string, bill: BillSummary, plan: BillSettlePlan | null): { marker: HomeMarker | null; view: MarkerView | null } {
+  const marker = billMarker(bill, viewer, plan);
+  const v = marker === null ? null : billMarkerView(marker, { plan, viewerId: viewer, nameOf: namesFor(viewer), summary: bill });
+  return { marker, view: v };
+}
+const pill = (p: string, a11y: string, tone: MarkerTone, icon: 'check' | null = null): MarkerView => ({ pill: p, a11y, tone, icon });
+
+/** T2 shape: Hana and Dee each paid 5000; four shares of 2500 → Mo→Hana 2500, Eve→Dee 2500. */
+const T2_SHARES = { [HOST]: 2500, [ME]: 2500, [DEE]: 2500, [EVE]: 2500 };
+const T2_PAYERS: Payer[] = [
+  { userId: HOST, paidCents: 5000 },
+  { userId: DEE, paidCents: 5000 },
+];
+const t2 = (payments: (key: string) => Payment[] = () => [], flags: SettleLedgerFlag[] = []) => {
+  const base = ledgerPlan(T2_SHARES, { payerId: HOST, payers: T2_PAYERS });
+  return ledgerPlan(T2_SHARES, { payerId: HOST, payers: T2_PAYERS, payments: payments(keyOf(base)), flags });
+};
+/** A guest bill (Hana hosts and leads), seen, claimed, complete, in a 4-person bill. */
+const splitGuestBill = (over: Partial<BillSummary> = {}) => guestBill(over);
+
+describe("who paid: 'routes' markers for someone who owes (D9, contract O)", () => {
+  it('the plan is a routes plan (T2 shape)', () => {
+    const plan = t2();
+    expect(plan.status).toBe('routes');
+    if (plan.status !== 'routes') return;
+    expect(plan.pairs.map((q) => [q.fromId, q.toId, q.remainingCents])).toEqual([
+      [ME, HOST, 2500],
+      [EVE, DEE, 2500],
+    ]);
+  });
+
+  it("owes one person: the counterparty's name is in the pill", () => {
+    expect(viewAs(ME, splitGuestBill(), t2())).toEqual({
+      marker: 'owes',
+      view: pill('You owe Hana $25.00', 'You owe Hana $25.00', 'accent'),
+    });
+  });
+
+  it('owes two people (T1 shape): "You owe 2 people", the a11y lists them, larger first', () => {
+    // Paid Hana 6000, Dee 4021; shares Hana 3341, Mo 3340, Dee 3340 → Mo→Hana 2659, Mo→Dee 681.
+    const shares = { [HOST]: 3341, [ME]: 3340, [DEE]: 3340 };
+    const plan = ledgerPlan(shares, { payerId: HOST, payers: [{ userId: HOST, paidCents: 6000 }, { userId: DEE, paidCents: 4021 }] });
+    expect(viewAs(ME, splitGuestBill(), plan)).toEqual({
+      marker: 'owes',
+      view: pill('You owe 2 people $33.40', 'You owe 2 people $33.40: Hana $26.59, Dee $6.81', 'accent'),
+    });
+    expect(balanceFor(plan, ME)).toEqual({ known: true, final: true, owesCents: 3340, owedCents: 0 });
+  });
+
+  it('a co-payer who owes the others (T5 shape) gets the owes pill, not a payer pill', () => {
+    // Paid Mo 5000, Hana 3000, Dee 2000; shares Mo 8000, Hana 1000, Dee 1000 → Mo→Hana 2000, Mo→Dee 1000.
+    const shares = { [HOST]: 1000, [ME]: 8000, [DEE]: 1000 };
+    const payers: Payer[] = [{ userId: ME, paidCents: 5000 }, { userId: HOST, paidCents: 3000 }, { userId: DEE, paidCents: 2000 }];
+    const plan = ledgerPlan(shares, { payerId: ME, payers });
+    const bill = splitGuestBill({ payerId: ME });
+    expect(viewAs(ME, bill, plan)).toEqual({
+      marker: 'owes',
+      view: pill('You owe 2 people $30.00', 'You owe 2 people $30.00: Hana $20.00, Dee $10.00', 'accent'),
+    });
+    expect(viewAs(HOST, bill, plan)).toEqual({ marker: 'left_to_pay', view: pill('1 person left to pay', '1 person still has to pay you', 'muted') });
+  });
+
+  it('paid along the route (current key) → the own pill with the method', () => {
+    const plan = t2((k) => [pay(ME, HOST, 2500, k)]);
+    expect(viewAs(ME, splitGuestBill(), plan)).toEqual({ marker: 'paid', view: pill('Sent $25.00', 'Sent $25.00', 'muted', 'check') });
+  });
+
+  it('paid less than the route → more to pay', () => {
+    const plan = t2((k) => [pay(ME, HOST, 2000, k, 'cash')]);
+    expect(viewAs(ME, splitGuestBill(), plan)).toEqual({
+      marker: 'paid_more',
+      view: pill('Paid · $5.00 more to pay', 'Paid, you owe $5.00 more', 'accent'),
+    });
+  });
+
+  it('paid more than the route → owed some back, naming who owes it', () => {
+    const plan = t2((k) => [pay(ME, HOST, 3000, k)]);
+    expect(viewAs(ME, splitGuestBill(), plan)).toEqual({
+      marker: 'paid_back_due',
+      view: pill('You are owed $5.00', 'You are owed $5.00: Hana owes you $5.00 back', 'muted'),
+    });
+    expect(viewAs(HOST, splitGuestBill(), plan)).toEqual({
+      marker: 'differences',
+      view: pill('1 difference to settle', '1 difference to settle', 'accent'),
+    });
+  });
+
+  it('within the 1¢ tolerance is still "paid"', () => {
+    const plan = t2((k) => [pay(ME, HOST, 2499, k)]);
+    expect(viewAs(ME, splitGuestBill(), plan).marker).toBe('paid');
+    expect(viewAs(ME, splitGuestBill(), plan).view?.pill).toBe('Sent $24.99');
+  });
+
+  it("not received: the recipient's flag on an unpaid route, before owes", () => {
+    const plan = t2(() => [], [{ fromId: ME, toId: HOST, cents: 2500, method: 'venmo' }]);
+    expect(viewAs(ME, splitGuestBill(), plan)).toEqual({
+      marker: 'not_received',
+      view: pill('Not received · $25.00', "Hana hasn't received your $25.00", 'accent'),
+    });
+  });
+
+  it("a flag to someone the viewer doesn't owe now is ignored", () => {
+    const plan = t2(() => [], [{ fromId: ME, toId: DEE, cents: 2500, method: 'venmo' }]);
+    expect(viewAs(ME, splitGuestBill(), plan).marker).toBe('owes');
+  });
+
+  it('someone with a zero share and no pairs gets no pill', () => {
+    const shares = { [HOST]: 5000, [ME]: 0, [DEE]: 5000 };
+    const plan = ledgerPlan(shares, { payerId: HOST, payers: T2_PAYERS });
+    expect(viewAs(ME, splitGuestBill(), plan).marker).toBeNull();
+  });
+
+  it('someone not in the plan gets no settle pill', () => {
+    const OUT = 'bbbbbbbb-0000-4000-8000-0000000000ff';
+    expect(billMarker(splitGuestBill(), OUT, t2())).toBeNull();
+    expect(billMarkerView('owes', { plan: t2(), viewerId: OUT, nameOf: namesFor(OUT) })).toBeNull();
+  });
+});
+
+describe("who paid: 'routes' markers for someone who is owed", () => {
+  // Paid Hana 6000, Dee 4000; shares Hana 1000, Mo 4000, Dee 1000, Eve 4000
+  // → Mo→Hana 4000, Eve→Hana 1000, Eve→Dee 3000 (pairs ordered by fromId, then toId).
+  const SHARES = { [HOST]: 1000, [ME]: 4000, [DEE]: 1000, [EVE]: 4000 };
+  const PAYERS: Payer[] = [{ userId: HOST, paidCents: 6000 }, { userId: DEE, paidCents: 4000 }];
+  const plan = (payments: (key: string) => Payment[] = () => []) =>
+    ledgerPlan(SHARES, { payerId: HOST, payers: PAYERS, payments: payments(keyOf(ledgerPlan(SHARES, { payerId: HOST, payers: PAYERS }))) });
+  const hostBill = (over: Partial<BillSummary> = {}) => summary({ hostId: HOST, payerId: HOST, seen: true, complete: true, ...over });
+
+  it('the routes are as worked out', () => {
+    const p = plan();
+    if (p.status !== 'routes') throw new Error(p.status);
+    expect(p.pairs.map((q) => [q.fromId, q.toId, q.remainingCents])).toEqual([
+      [ME, HOST, 4000],
+      [EVE, HOST, 1000],
+      [EVE, DEE, 3000],
+    ]);
+  });
+
+  it('2, then 1 person left to pay', () => {
+    expect(viewAs(HOST, hostBill(), plan())).toEqual({ marker: 'left_to_pay', view: pill('2 people left to pay', '2 people still have to pay you', 'muted') });
+    expect(viewAs(HOST, hostBill(), plan((k) => [pay(ME, HOST, 4000, k)]))).toEqual({
+      marker: 'left_to_pay',
+      view: pill('1 person left to pay', '1 person still has to pay you', 'muted'),
+    });
+  });
+
+  it("sent: an unseen send while someone still owes the viewer (names from the viewer's nameOf)", () => {
+    const p = plan((k) => [pay(ME, HOST, 4000, k)]);
+    const bill = hostBill({ seen: false, seenAt: null });
+    expect(viewAs(HOST, bill, p)).toEqual({ marker: 'sent', view: pill('Mo sent you $40.00', 'Mo sent you $40.00 on Venmo', 'muted') });
+    expect(sentFacts(bill, p, HOST, namesFor(HOST))).toEqual({
+      billId: bill.id,
+      senders: [{ userId: ME, name: 'Mo', cents: 4000, method: 'venmo', at: AT }],
+      newestAt: AT,
+    });
+    // Seen after the send → back to left_to_pay; no unseen senders.
+    const seenBill = hostBill({ seen: true, seenAt: LATER });
+    expect(viewAs(HOST, seenBill, p).marker).toBe('left_to_pay');
+    expect(sentFacts(seenBill, p, HOST, namesFor(HOST))).toBeNull();
+  });
+
+  it('once everyone has paid the viewer, Settled up (even with an unseen send)', () => {
+    const p = plan((k) => [pay(ME, HOST, 4000, k), pay(EVE, HOST, 1000, k)]);
+    const settled = pill('Settled up', 'Settled up, everyone has settled up with you', 'muted', 'check');
+    expect(viewAs(HOST, hostBill(), p)).toEqual({ marker: 'settled', view: settled });
+    expect(viewAs(HOST, hostBill({ seen: false, seenAt: null }), p)).toEqual({ marker: 'settled', view: settled });
+    expect(viewAs(DEE, splitGuestBill(), p).marker).toBe('left_to_pay'); // Eve→Dee still open
+  });
+
+  it('two differences on the viewer’s pairs are counted', () => {
+    const p = plan((k) => [pay(ME, HOST, 3000, k), pay(EVE, HOST, 1500, k)]);
+    expect(viewAs(HOST, hostBill(), p)).toEqual({ marker: 'differences', view: pill('2 differences to settle', '2 differences to settle', 'accent') });
+  });
+
+  it('someone who owes two people sees both (Eve)', () => {
+    expect(viewAs(EVE, splitGuestBill(), plan()).view).toEqual(pill('You owe 2 people $40.00', 'You owe 2 people $40.00: Dee $30.00, Hana $10.00', 'accent'));
+  });
+});
+
+describe("who paid: T0, a one-person bill with money to an ex-payer (A1.2)", () => {
+  // Mo was the payer; Dee paid Mo 1200 (earlier key). The host sets the payer to Hana.
+  // Shares Hana 1400, Mo 1400, Dee 1200 → Dee→Mo 1200 settled; Mo→Hana 2600.
+  const SHARES = { [HOST]: 1400, [ME]: 1400, [DEE]: 1200 };
+  const earlier = pay(DEE, ME, 1200, null, 'other');
+  const t0 = (more: (key: string) => Payment[] = () => []) => {
+    const base = ledgerPlan(SHARES, { payerId: HOST, payments: [earlier] });
+    return ledgerPlan(SHARES, { payerId: HOST, payments: [earlier, ...more(keyOf(base))] });
+  };
+
+  it('the holder owes the new payer, by name', () => {
+    expect(viewAs(ME, splitGuestBill(), t0())).toEqual({ marker: 'owes', view: pill('You owe Hana $26.00', 'You owe Hana $26.00', 'accent') });
+  });
+  it('the sender has nothing left: their own paid pill', () => {
+    expect(viewAs(DEE, splitGuestBill(), t0())).toEqual({ marker: 'paid', view: pill('Paid $12.00', 'Paid $12.00', 'muted', 'check') });
+  });
+  it('the new payer waits on one person', () => {
+    expect(viewAs(HOST, summary({ hostId: HOST, seen: true, complete: true }), t0()).marker).toBe('left_to_pay');
+  });
+  it('once the holder pays on, they read Settled up (they were paid and have paid)', () => {
+    expect(viewAs(ME, splitGuestBill(), t0((k) => [pay(ME, HOST, 2600, k)])).marker).toBe('settled');
+  });
+
+  describe('early (incomplete, proportional, one payer)', () => {
+    const earlyInput = sharesInput(SHARES, { unclaimed: 100 });
+    const early = (more: (key: string) => Payment[] = () => []) => {
+      const base = ledgerPlan(SHARES, { payerId: HOST, payments: [earlier], input: earlyInput });
+      return ledgerPlan(SHARES, { payerId: HOST, payments: [earlier, ...more(keyOf(base))], input: earlyInput });
+    };
+    it('is an early routes plan', () => {
+      const p = early();
+      expect(p.status === 'routes' && p.early !== null).toBe(true);
+    });
+    it('an item claimer who owes → owes', () => {
+      expect(viewAs(ME, splitGuestBill({ complete: false }), early()).marker).toBe('owes');
+    });
+    it('a difference paid early reads as paid (differences wait for completion)', () => {
+      expect(viewAs(ME, splitGuestBill({ complete: false }), early((k) => [pay(ME, HOST, 2000, k)])).marker).toBe('paid');
+    });
+    it('the creditor gets no pill unless there is an unseen send while someone still owes (HM-4)', () => {
+      const hostBill = summary({ hostId: HOST, seen: true, seenAt: LATER, complete: false });
+      expect(viewAs(HOST, hostBill, early()).marker).toBeNull();
+      // Mo, the only one owing Hana, sent part: nobody unpaid is left, so no pill (as one payer's early plan).
+      expect(viewAs(HOST, summary({ hostId: HOST, complete: false }), early((k) => [pay(ME, HOST, 1000, k)])).marker).toBeNull();
+      // Eve owes Hana too and hasn't paid: the unseen send shows.
+      const shares = { [HOST]: 1400, [ME]: 1400, [DEE]: 1200, [EVE]: 300 };
+      const inp = sharesInput(shares, { unclaimed: 100 });
+      const base = ledgerPlan(shares, { payerId: HOST, payments: [earlier], input: inp });
+      const p = ledgerPlan(shares, { payerId: HOST, payments: [earlier, pay(ME, HOST, 1000, keyOf(base))], input: inp });
+      expect(viewAs(HOST, summary({ hostId: HOST, complete: false }), p)).toEqual({
+        marker: 'sent',
+        view: pill('Mo sent you $10.00', 'Mo sent you $10.00 on Venmo', 'muted'),
+      });
+    });
+    it("someone who can't settle early (no item claim) gets no owes pill", () => {
+      const shares = { [HOST]: 1400, [ME]: 1400, [DEE]: 1200, [EVE]: 0 };
+      const inp = sharesInput(shares, { unclaimed: 100 });
+      const p = ledgerPlan(shares, { payerId: HOST, payments: [earlier], input: inp });
+      expect(p.status).toBe('routes');
+      expect(viewAs(EVE, splitGuestBill({ complete: false, claimedAny: true }), p).marker).toBeNull();
+    });
+  });
+});
+
+describe("who paid: 'blocked_payers' (D9 Home pills, D10 groups)", () => {
+  // Hana 6000 + Dee 4000 = 10000, but the total is now 10300.
+  const SHARES = { [HOST]: 2575, [ME]: 2575, [DEE]: 2575, [EVE]: 2575 };
+  const stale = () => ledgerPlan(SHARES, { payerId: HOST, payers: [{ userId: HOST, paidCents: 6000 }, { userId: DEE, paidCents: 4000 }] });
+  const FIX = pill('Fix who paid', "Who paid doesn't match the new total. Fix who paid", 'accent');
+  const UPDATING = pill('Who paid is being updated', "Who paid is being updated. You can settle up once it's fixed", 'muted');
+
+  it('is a blocked_payers plan', () => {
+    expect(stale().status).toBe('blocked_payers');
+  });
+  it('the host: Fix who paid (accent)', () => {
+    const bill = summary({ hostId: ME, payerId: ME, seen: true, complete: true });
+    expect(viewAs(ME, bill, stale())).toEqual({ marker: 'waiting_on_others', view: FIX });
+  });
+  it('the host, even with nothing claimed and the bill incomplete', () => {
+    const bill = summary({ hostId: ME, payerId: ME, seen: true, complete: false, claimedAny: false });
+    expect(viewAs(ME, bill, stale())).toEqual({ marker: 'waiting_on_others', view: FIX });
+  });
+  it('a guest who claimed: Who paid is being updated (muted)', () => {
+    expect(viewAs(ME, splitGuestBill(), stale())).toEqual({ marker: 'waiting_on_others', view: UPDATING });
+  });
+  it('a co-payer who is not the host gets the same as other guests', () => {
+    expect(viewAs(DEE, splitGuestBill(), stale())).toEqual({ marker: 'waiting_on_others', view: UPDATING });
+  });
+  it('a guest on a complete bill without claims still sees it', () => {
+    expect(viewAs(ME, splitGuestBill({ claimedAny: false }), stale())).toEqual({ marker: 'waiting_on_others', view: UPDATING });
+  });
+  it('new and unclaimed still win for guests', () => {
+    expect(billMarker(splitGuestBill({ added: true, seen: false }), ME, stale())).toBe('new');
+    expect(billMarker(splitGuestBill({ claimedAny: false, complete: false }), ME, stale())).toBe('unclaimed');
+  });
+  it("without the summary's host id the view can't tell the host, so it gives the guest copy", () => {
+    expect(billMarkerView('waiting_on_others', { plan: stale(), viewerId: ME, nameOf: namesFor(ME) })).toEqual(UPDATING);
+  });
+  it('the row label gains the a11y words', () => {
+    const bill = summary({ hostId: ME, payerId: ME, seen: true, complete: true });
+    expect(billRowA11yLabel(bill, ME, fmt, { plan: stale(), nameOf: namesFor(ME) })).toBe(
+      "Your bill · Nov 20 · $44.80. Who paid doesn't match the new total. Fix who paid",
+    );
+  });
+  it('other markers give no pill on a blocked_payers plan', () => {
+    for (const m of ['owes', 'paid', 'left_to_pay', 'settled', 'sent'] as const) {
+      expect(billMarkerView(m, { plan: stale(), viewerId: ME, nameOf: namesFor(ME) })).toBeNull();
+    }
+    expect(sentFacts(splitGuestBill(), stale(), ME, namesFor(ME))).toBeNull();
+  });
+});
+
+describe('who paid: a split that is incomplete is blocked as before (rule E′)', () => {
+  it('a guest who claimed: Claimed · not ready to pay', () => {
+    const inp = sharesInput(T2_SHARES, { unclaimed: 0 });
+    inp.items.push({ id: 'u2', totalCents: 0 });
+    inp.totalCents = 10000;
+    const plan = ledgerPlan(T2_SHARES, { payerId: HOST, payers: T2_PAYERS, input: inp });
+    expect(plan.status).toBe('blocked');
+    expect(viewAs(ME, splitGuestBill({ complete: false }), plan)).toEqual({
+      marker: 'waiting_on_others',
+      view: pill('Claimed · not ready to pay', "You've claimed. You can pay once the bill is ready", 'muted'),
+    });
+  });
+});

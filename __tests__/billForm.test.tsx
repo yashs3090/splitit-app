@@ -58,12 +58,12 @@ beforeEach(() => {
 });
 
 describe('bill form', () => {
-  it('27: home shows "Scan receipt", which goes to /scan', async () => {
+  it('27: home shows "Add receipt" (the tab bar\'s (+)), which goes to /scan', async () => {
     const router = renderRouter(ROUTES, { initialUrl: '/' });
-    expect(await screen.findByText('Your bills')).toBeTruthy();
-    // Sign out moved to Profile (docs/specs/2026-11-24-profile-venmo.md, Q1); home links there.
-    expect(screen.getByLabelText('Profile')).toBeTruthy();
-    fireEvent.press(screen.getByText('Scan receipt'));
+    expect(await screen.findByRole('header', { name: 'SplitIt' })).toBeTruthy();
+    // Sign out moved to Profile (docs/specs/2026-11-24-profile-venmo.md, Q1); the Profile tab leads there.
+    expect(screen.getByRole('tab', { name: 'Profile' })).toBeTruthy();
+    fireEvent.press(screen.getByRole('button', { name: 'Add receipt, opens a photo or typing the items' }));
     await waitFor(() => expect(router.getPathname()).toBe('/scan'));
   });
 

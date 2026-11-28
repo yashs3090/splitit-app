@@ -54,7 +54,10 @@ function EditBillScreen({ id, myId }: { id: string; myId: string }) {
       // A read RLS refuses (not_allowed) gets the no-access copy too, like useBill.
       if (!res.ok) setLoad({ status: res.error === 'not_found' || res.error === 'not_allowed' ? 'not_found' : 'error' });
       else if (res.bill.host_id !== myId) setLoad({ status: 'not_host' });
-      else setLoad({ status: 'ready', data: { bill: res.bill, rows: res.rows, participants: res.participants, claims: res.claims } });
+      else {
+        const { bill, rows, participants, claims, payers, payments, flags } = res;
+        setLoad({ status: 'ready', data: { bill, rows, participants, claims, payers, payments, flags } });
+      }
     });
     return () => {
       live = false;

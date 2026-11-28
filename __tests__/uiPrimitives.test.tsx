@@ -2,6 +2,9 @@
 // label, state), a 44-pt target where it's tappable, and theme colors in light and dark.
 import { fireEvent, render, screen } from '@testing-library/react-native';
 import Check from 'lucide-react-native/icons/check';
+import ChevronDown from 'lucide-react-native/icons/chevron-down';
+import ChevronRight from 'lucide-react-native/icons/chevron-right';
+import ChevronUp from 'lucide-react-native/icons/chevron-up';
 import CircleAlert from 'lucide-react-native/icons/circle-alert';
 import CircleCheck from 'lucide-react-native/icons/circle-check';
 import Info from 'lucide-react-native/icons/info';
@@ -10,6 +13,7 @@ import Plus from 'lucide-react-native/icons/plus';
 import X from 'lucide-react-native/icons/x';
 import { StyleSheet, Text } from 'react-native';
 
+import { DisclosureRow } from '@/components/ui/DisclosureRow';
 import { Icon } from '@/components/ui/Icon';
 import { IconButton } from '@/components/ui/IconButton';
 import { ListRow } from '@/components/ui/ListRow';
@@ -17,7 +21,7 @@ import { SectionHeader } from '@/components/ui/SectionHeader';
 import { SegmentedControl } from '@/components/ui/SegmentedControl';
 import { StatusLine } from '@/components/ui/StatusLine';
 import { TextLink } from '@/components/ui/TextLink';
-import { colors, ICON_STROKE, iconSize, ROW_MIN_HEIGHT, TOUCH_TARGET } from '@/lib/theme';
+import { colors, ICON_STROKE, iconSize, ROW_MIN_HEIGHT, TOUCH_TARGET, type } from '@/lib/theme';
 
 // Some components import lib modules that reach the Supabase client; use the shared fake.
 jest.mock('@/lib/supabase', () => {
@@ -478,11 +482,8 @@ describe('Avatar rings (dark-mode visibility)', () => {
   });
 });
 
-describe('ToneIcon and PayerPicker (V11, P3)', () => {
+describe('ToneIcon (V11, P3)', () => {
   const { ToneIcon } = jest.requireActual<typeof import('@/components/ui/ToneIcon')>('@/components/ui/ToneIcon');
-  const { PayerPicker } = jest.requireActual<typeof import('@/components/PayerPicker')>('@/components/PayerPicker');
-  const CircleDot = jest.requireActual<typeof import('lucide-react-native/icons/circle-dot')>('lucide-react-native/icons/circle-dot').default;
-  const Circle = jest.requireActual<typeof import('lucide-react-native/icons/circle')>('lucide-react-native/icons/circle').default;
 
   it.each([
     ['success', Check],
@@ -498,33 +499,11 @@ describe('ToneIcon and PayerPicker (V11, P3)', () => {
     render(<ToneIcon tone="muted" color="#123456" />);
     expect(screen.toJSON()).toBeNull();
   });
-
-  it('payer radios: dot for the checked row, ring for the others; radio semantics unchanged; no glyphs', () => {
-    render(
-      <PayerPicker
-        rows={[
-          { userId: 'a', name: 'Hana', checked: true },
-          { userId: 'b', name: 'Sam', checked: false },
-        ]}
-        busyId={null}
-        confirm={null}
-        saving={false}
-        error={null}
-        onPick={() => {}}
-        onConfirm={() => {}}
-        onCancelConfirm={() => {}}
-      />,
-    );
-    expect(screen.getByRole('radio', { name: 'Hana' }).props.accessibilityState).toMatchObject({ checked: true });
-    expect(screen.UNSAFE_getAllByType(CircleDot)).toHaveLength(1);
-    expect(screen.UNSAFE_getAllByType(Circle)).toHaveLength(1);
-    expect(screen.queryByText(/[◉○]/)).toBeNull();
-  });
 });
 
 describe('focus rings on custom pressables (review R9)', () => {
   const { ClaimItemRow } = jest.requireActual<typeof import('@/components/ClaimItemRow')>('@/components/ClaimItemRow');
-  const { PayerPicker } = jest.requireActual<typeof import('@/components/PayerPicker')>('@/components/PayerPicker');
+  const { PayerLine } = jest.requireActual<typeof import('@/components/PayerLine')>('@/components/PayerLine');
   const ring = (el: { props: { style?: unknown } }) => flat(el.props.style).outlineWidth;
 
   it('claim toggle and the row details target', () => {
@@ -550,20 +529,261 @@ describe('focus rings on custom pressables (review R9)', () => {
     expect(ring(details())).toBe(2);
   });
 
-  it('payer rows', () => {
+  it('the host\'s "Paid by" line (it replaced the payer radios on Settle up)', () => {
     render(
-      <PayerPicker
-        rows={[{ userId: 'a', name: 'Hana', checked: true }]}
-        busyId={null}
-        confirm={null}
-        saving={false}
-        error={null}
-        onPick={() => {}}
-        onConfirm={() => {}}
-        onCancelConfirm={() => {}}
+      <PayerLine
+        line={{
+          text: 'Paid by you',
+          action: 'change',
+          actionLabel: 'Change',
+          tone: 'muted',
+          icon: null,
+          a11yLabel: 'Paid by you. Change who paid',
+          a11yHint: 'Opens who paid',
+        }}
+        onPress={() => {}}
       />,
     );
-    fireEvent(screen.getByRole('radio', { name: 'Hana' }), 'focus');
-    expect(ring(screen.getByRole('radio', { name: 'Hana' }))).toBe(2);
+    const line = () => screen.getByRole('button', { name: 'Paid by you. Change who paid' });
+    expect(ring(line())).toBeUndefined();
+    fireEvent(line(), 'focus');
+    expect(ring(line())).toBe(2);
+  });
+});
+
+describe('TextField font size (home mobile refresh, criterion 28)', () => {
+  const { Platform } = jest.requireActual<typeof import('react-native')>('react-native');
+  const { TextField } = jest.requireActual<typeof import('@/components/ui/TextField')>('@/components/ui/TextField');
+  // iOS Safari zooms the page into any focused input under 16px.
+  let os: { restore(): void } | undefined;
+  const setOS = (value: 'web' | 'ios') => {
+    os = jest.replaceProperty(Platform, 'OS', value);
+  };
+  afterEach(() => os?.restore());
+  const inputSize = (props: { subtle?: boolean; large?: boolean }) => {
+    render(<TextField label="Field" {...props} />);
+    return flat(screen.getByLabelText('Field').props.style).fontSize;
+  };
+
+  it('on web, a subtle field uses the body size (16), so the page never zooms in', () => {
+    setOS('web');
+    expect(inputSize({ subtle: true })).toBe(16);
+  });
+
+  it('on iOS, a subtle field keeps the caption size (13)', () => {
+    setOS('ios');
+    expect(inputSize({ subtle: true })).toBe(13);
+  });
+
+  it.each(['web', 'ios'] as const)('regular and large fields are at least 16 on %s', (platform) => {
+    setOS(platform);
+    expect(inputSize({})).toBeGreaterThanOrEqual(16);
+    screen.unmount();
+    expect(inputSize({ large: true })).toBeGreaterThanOrEqual(16);
+  });
+});
+
+describe('DisclosureRow (home groups v2, A1.M1 / S1 / S6)', () => {
+  const props = {
+    label: 'Settled (3)',
+    a11yLabel: 'Settled, 3 bills',
+    showHint: 'Shows bills everyone has paid you for',
+    hideHint: 'Hides settled bills',
+    showText: 'Show',
+    hideText: 'Hide',
+  };
+  const hidden = { includeHiddenElements: true };
+  const button = () => screen.getByRole('button', { name: 'Settled, 3 bills' });
+
+  it('closed: a button, collapsed, the show hint, "Show" and a down chevron, never a right one', () => {
+    const onToggle = jest.fn();
+    render(<DisclosureRow {...props} open={false} onToggle={onToggle} />);
+    expect(button().props.accessibilityState).toMatchObject({ expanded: false });
+    expect(button().props.accessibilityHint).toBe('Shows bills everyone has paid you for');
+    expect(screen.getByText('Settled (3)')).toBeTruthy();
+    expect(screen.getByText('Show', hidden)).toBeTruthy();
+    expect(screen.UNSAFE_getAllByType(ChevronDown)).toHaveLength(1); // positive control
+    expect(screen.UNSAFE_queryAllByType(ChevronUp)).toHaveLength(0);
+    expect(screen.UNSAFE_queryAllByType(ChevronRight)).toHaveLength(0);
+    fireEvent.press(button());
+    expect(onToggle).toHaveBeenCalledTimes(1);
+  });
+
+  it('open: expanded, the hide hint, "Hide" and an up chevron', () => {
+    render(<DisclosureRow {...props} open onToggle={() => {}} />);
+    expect(button().props.accessibilityState).toMatchObject({ expanded: true });
+    expect(button().props.accessibilityHint).toBe('Hides settled bills');
+    expect(screen.getByText('Hide', hidden)).toBeTruthy();
+    expect(screen.queryByText('Show', hidden)).toBeNull();
+    expect(screen.UNSAFE_getAllByType(ChevronUp)).toHaveLength(1);
+    expect(screen.UNSAFE_queryAllByType(ChevronDown)).toHaveLength(0);
+    expect(screen.UNSAFE_queryAllByType(ChevronRight)).toHaveLength(0);
+  });
+
+  it('the word and chevron are hidden from screen readers; the label is the a11y label', () => {
+    render(<DisclosureRow {...props} open={false} onToggle={() => {}} />);
+    const word = screen.getByText('Show', hidden);
+    expect(screen.queryByText('Show')).toBeNull(); // not reachable without includeHiddenElements
+    let box = word.parent;
+    while (box && box.props.importantForAccessibility === undefined) box = box.parent;
+    expect(box?.props).toMatchObject({ accessible: false, importantForAccessibility: 'no-hide-descendants' });
+    expect(box?.findAll((n) => n === screen.UNSAFE_getByType(ChevronDown))).toHaveLength(1);
+  });
+
+  it('a 44-pt target across the column, kept on the heading grid by a token-derived margin', () => {
+    render(<DisclosureRow {...props} open={false} onToggle={() => {}} />);
+    const style = flat(button().props.style);
+    expect(style.minHeight).toBe(TOUCH_TARGET);
+    expect(style.alignSelf).toBeUndefined();
+    expect(style.marginVertical).toBe(-(TOUCH_TARGET - type.section.lineHeight) / 2);
+    expect(style.flexDirection).toBe('row');
+  });
+
+  it.each(['light', 'dark'] as const)('the label is section / textMuted, the word caption 600 / primary, the chevron primary (%s)', (scheme) => {
+    mockScheme.mockReturnValue(scheme);
+    render(<DisclosureRow {...props} open={false} onToggle={() => {}} />);
+    expect(flat(screen.getByText('Settled (3)').props.style)).toMatchObject({ ...type.section, color: colors[scheme].textMuted });
+    expect(flat(screen.getByText('Show', hidden).props.style)).toMatchObject({
+      fontSize: type.caption.fontSize,
+      fontWeight: '600',
+      color: colors[scheme].primary,
+    });
+    expect(screen.UNSAFE_getByType(ChevronDown).props).toMatchObject({ size: iconSize.sm, color: colors[scheme].primary });
+  });
+
+  // Review R1: what the browser gets. react-native-web 0.21 drops accessibilityState (and the native
+  // hiding props), so this renders the real component through react-native-web to static HTML.
+  it.each([false, true])('on web (react-native-web markup), open=%s: a button with aria-expanded, aria-label, and the word aria-hidden', (open) => {
+    let html = '';
+    jest.isolateModules(() => {
+      jest.doMock('react-native', () => jest.requireActual('react-native-web'));
+      // lucide's native SVG doesn't render under react-dom; the chevron isn't what's checked here.
+      jest.doMock('@/components/ui/Icon', () => ({ Icon: () => null }));
+      const React = jest.requireActual<typeof import('react')>('react');
+      // @types/react-dom isn't installed; this is the one function used.
+      const { renderToStaticMarkup } = jest.requireActual<{ renderToStaticMarkup: (el: React.ReactElement) => string }>('react-dom/server');
+      const { DisclosureRow: WebRow } = jest.requireActual<typeof import('@/components/ui/DisclosureRow')>('@/components/ui/DisclosureRow');
+      html = renderToStaticMarkup(React.createElement(WebRow, { ...props, open, onToggle: () => {} }));
+    });
+    expect(html).toMatch(/^<button [^>]*role="button"/); // positive control: it's the web button
+    expect(html).toContain('aria-label="Settled, 3 bills"');
+    expect(html).toContain(`aria-expanded="${String(open)}"`);
+    expect(html).toMatch(new RegExp(`<div aria-hidden="true"[^>]*><div[^>]*>${open ? 'Hide' : 'Show'}</div>`));
+  });
+
+  // Pressed opacity (opacity.pressed) isn't asserted: the test renderer doesn't drive Pressable's
+  // pressed state, and no other primitive test does either.
+  it('a keyboard focus ring', () => {
+    render(<DisclosureRow {...props} open={false} onToggle={() => {}} />);
+    expect(flat(button().props.style).outlineWidth).toBeUndefined();
+    fireEvent(button(), 'focus');
+    expect(flat(button().props.style).outlineWidth).toBe(2);
+  });
+});
+
+// QA F1: what the browser gets. react-native-web 0.21 drops accessibilityState, so each primitive
+// also passes aria-* props. These render the real components through react-native-web to static
+// HTML (the DisclosureRow R1 pattern) and read the attributes off the DOM tags.
+describe('web aria state (QA F1, react-native-web markup)', () => {
+  function webMarkup(build: (React: typeof import('react')) => React.ReactElement): string {
+    let html = '';
+    jest.isolateModules(() => {
+      jest.doMock('react-native', () => jest.requireActual('react-native-web'));
+      // lucide's native SVG doesn't render under react-dom; icons aren't what's checked here.
+      jest.doMock('@/components/ui/Icon', () => ({ Icon: () => null }));
+      const React = jest.requireActual<typeof import('react')>('react');
+      // @types/react-dom isn't installed; this is the one function used.
+      const { renderToStaticMarkup } = jest.requireActual<{ renderToStaticMarkup: (el: React.ReactElement) => string }>('react-dom/server');
+      html = renderToStaticMarkup(build(React));
+    });
+    return html;
+  }
+  /** The opening tag of the element with this aria-label (throws if there isn't exactly one). */
+  function tag(html: string, label: string): string {
+    const found = html.match(new RegExp(`<[a-z]+ [^>]*aria-label="${label}"[^>]*>`, 'g')) ?? [];
+    if (found.length !== 1) throw new Error(`${found.length} tags labelled ${label} in ${html}`);
+    return found[0] ?? '';
+  }
+  const ui = <T extends object>(path: string) => jest.requireActual<T>(path);
+
+  const METHODS = [
+    { value: 'venmo', label: 'Venmo', accessibilityLabel: 'Venmo, how you pay' },
+    { value: 'cash', label: 'Cash', accessibilityLabel: 'Cash, how you pay' },
+  ] as const;
+
+  it.each([false, true])('SegmentedControl radio (disabled=%s): a labelled radiogroup; each radio has aria-checked', (disabled) => {
+    const html = webMarkup((React) => {
+      const { SegmentedControl: Web } = ui<typeof import('@/components/ui/SegmentedControl')>('@/components/ui/SegmentedControl');
+      return React.createElement(Web, { options: METHODS, value: 'venmo', onChange: () => {}, semantics: 'radio', groupLabel: 'How you pay', disabled });
+    });
+    expect(tag(html, 'How you pay')).toContain('role="radiogroup"');
+    const venmo = tag(html, 'Venmo, how you pay');
+    const cash = tag(html, 'Cash, how you pay');
+    expect(venmo).toContain('role="radio"'); // positive control: the web radio
+    expect(venmo).toContain('aria-checked="true"');
+    expect(cash).toContain('aria-checked="false"');
+    for (const t of [venmo, cash]) {
+      expect(t).not.toContain('aria-selected');
+      if (disabled) expect(t).toContain('aria-disabled="true"');
+      else expect(t).not.toContain('aria-disabled');
+    }
+  });
+
+  it.each([false, true])('SegmentedControl buttons (disabled=%s): aria-pressed on web (aria-selected isn\'t allowed on a button)', (disabled) => {
+    const html = webMarkup((React) => {
+      const { SegmentedControl: Web } = ui<typeof import('@/components/ui/SegmentedControl')>('@/components/ui/SegmentedControl');
+      return React.createElement(Web, { options: METHODS, value: 'cash', onChange: () => {}, disabled });
+    });
+    const venmo = tag(html, 'Venmo, how you pay');
+    const cash = tag(html, 'Cash, how you pay');
+    expect(cash).toContain('role="button"');
+    expect(cash).toContain('aria-pressed="true"');
+    expect(venmo).toContain('aria-pressed="false"');
+    for (const t of [venmo, cash]) {
+      expect(t).not.toContain('aria-selected');
+      expect(t).not.toContain('aria-checked');
+      if (disabled) expect(t).toContain('aria-disabled="true"');
+      else expect(t).not.toContain('aria-disabled');
+    }
+  });
+
+  it('TextLink: the caller\'s expanded state, and busy + disabled while loading', () => {
+    const render = (props: Record<string, unknown>) =>
+      webMarkup((React) => {
+        const { TextLink: Web } = ui<typeof import('@/components/ui/TextLink')>('@/components/ui/TextLink');
+        return React.createElement(Web, { label: 'Show QR code', accessibilityLabel: 'Show QR code', onPress: () => {}, ...props });
+      });
+    const idle = tag(render({ accessibilityState: { expanded: false } }), 'Show QR code');
+    expect(idle).toContain('role="button"');
+    expect(idle).toContain('aria-expanded="false"');
+    expect(idle).not.toContain('aria-busy');
+    expect(idle).not.toContain('aria-disabled');
+
+    const loading = tag(render({ accessibilityState: { expanded: true }, loading: true }), 'Show QR code');
+    expect(loading).toContain('aria-expanded="true"');
+    expect(loading).toContain('aria-busy="true"');
+    expect(loading).toContain('aria-disabled="true"');
+
+    const disabled = tag(render({ disabled: true }), 'Show QR code');
+    expect(disabled).toContain('aria-disabled="true"');
+    expect(disabled).not.toContain('aria-busy');
+  });
+
+  it('Button: busy + disabled while loading, disabled alone when disabled, neither when idle', () => {
+    const render = (props: Record<string, unknown>) =>
+      webMarkup((React) => {
+        const { Button: Web } = ui<typeof import('@/components/ui/Button')>('@/components/ui/Button');
+        return React.createElement(Web, { label: 'Not received', accessibilityLabel: 'Not received', onPress: () => {}, ...props });
+      });
+    const idle = tag(render({}), 'Not received');
+    expect(idle).toContain('role="button"');
+    expect(idle).not.toContain('aria-busy');
+    expect(idle).not.toContain('aria-disabled');
+    const loading = tag(render({ loading: true }), 'Not received');
+    expect(loading).toContain('aria-busy="true"');
+    expect(loading).toContain('aria-disabled="true"');
+    const disabled = tag(render({ disabled: true }), 'Not received');
+    expect(disabled).toContain('aria-disabled="true"');
+    expect(disabled).not.toContain('aria-busy');
   });
 });

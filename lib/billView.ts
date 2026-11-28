@@ -56,12 +56,17 @@ export function makeNameOf(participants: readonly BillParticipant[], myId: strin
   };
 }
 
-/** Up to two letters: the first letters of the first and last words. "?" when there is no name. */
+/**
+ * Up to two letters: the first letters of the first and last words. "?" when there is no name.
+ * Bracketed notes ("Tejesh (demo)") are dropped and a word's letter is its first letter or digit,
+ * so punctuation never shows up as an initial.
+ */
 export function initials(name: string | null): string {
-  const words = cleanName(name)?.split(/\s+/) ?? [];
+  const cleaned = cleanName(name)?.replace(/\([^)]*\)|\[[^\]]*\]/g, ' ') ?? '';
+  const words = cleaned.split(/\s+/).filter((w) => /[\p{L}\p{N}]/u.test(w));
   const first = words[0];
   if (first === undefined) return '?';
-  const letter = (w: string) => (Array.from(w)[0] ?? '').toUpperCase();
+  const letter = (w: string) => (w.match(/[\p{L}\p{N}]/u)?.[0] ?? '').toUpperCase();
   const last = words.length > 1 ? words[words.length - 1] : undefined;
   return letter(first) + (last ? letter(last) : '');
 }

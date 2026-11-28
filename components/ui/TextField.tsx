@@ -61,7 +61,9 @@ export function TextField({ label, showLabel = false, prefix, hint, error, inval
             onBlur?.(e);
           }}
           style={[
-            subtle ? type.caption : large ? type.title : type.body,
+            // On web, iOS Safari zooms the page into a focused input under 16px, so a subtle field
+            // uses the body size there; native keeps the smaller caption (HR-16).
+            subtle ? (Platform.OS === 'web' ? type.body : type.caption) : large ? type.title : type.body,
             styles.input,
             { color: colors.text },
             numeric && [tabularNums, styles.numeric],

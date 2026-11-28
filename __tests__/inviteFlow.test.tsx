@@ -99,7 +99,7 @@ describe('invite flow', () => {
     expect(storage.data.size).toBe(0);
   });
 
-  it('25: signed out, / redirects to /sign-in; signing in with no invite lands on home ("Your bills"; "Signed in as" was dropped by P4)', async () => {
+  it('25: signed out, / redirects to /sign-in; signing in with no invite lands on home (its "SplitIt" heading, after the path is /; "Signed in as" was dropped by P4)', async () => {
     const router = renderRouter(APP_DIR, { initialUrl: '/' });
     await waitFor(() => expect(router.getPathname()).toBe('/sign-in'));
     expect(screen.queryByPlaceholderText(/email/i)).toBeNull();
@@ -107,13 +107,13 @@ describe('invite flow', () => {
     await pressContinueWithGoogle();
 
     await waitFor(() => expect(router.getPathname()).toBe('/'));
-    expect(await screen.findByText('Your bills')).toBeTruthy();
+    expect(await screen.findByRole('header', { name: 'SplitIt' })).toBeTruthy();
   });
 
   it('26: sign-out (on Profile, opened from home) clears the session and any pending invite', async () => {
     supabase.__setInitialSession(fakeSession());
     const router = renderRouter(APP_DIR, { initialUrl: '/' });
-    expect(await screen.findByText('Your bills')).toBeTruthy();
+    expect(await screen.findByRole('header', { name: 'SplitIt' })).toBeTruthy();
     // Sign out lives on Profile only (docs/specs/2026-11-24-profile-venmo.md, Q1).
     expect(screen.queryByText('Sign out')).toBeNull();
     const profile = screen.getByLabelText('Profile');
@@ -157,7 +157,7 @@ describe('invite flow', () => {
     supabase.__setInitialSession(fakeSession());
     const router = renderRouter(APP_DIR, { initialUrl: '/sign-in' });
     await waitFor(() => expect(router.getPathname()).toBe('/'));
-    expect(await screen.findByText('Your bills')).toBeTruthy();
+    expect(await screen.findByRole('header', { name: 'SplitIt' })).toBeTruthy();
   });
 
   it('a cancelled Google sign-in shows an error and stays on /sign-in', async () => {
@@ -192,7 +192,7 @@ describe('invite flow', () => {
     it('signed out with no pending invite: lands on home after the exchange', async () => {
       const router = renderRouter(APP_DIR, { initialUrl: '/auth/callback?code=callback-code-2' });
       await waitFor(() => expect(router.getPathname()).toBe('/'));
-      expect(await screen.findByText('Your bills')).toBeTruthy();
+      expect(await screen.findByRole('header', { name: 'SplitIt' })).toBeTruthy();
     });
 
     it('does not exchange again when already signed in, and goes home', async () => {

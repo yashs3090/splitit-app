@@ -1,6 +1,8 @@
 // The invite link /b/<code>. Signed out: remember the invite and go to sign-in (the root layout's
 // single resume effect brings the person back here afterwards). Signed in: join, then open the bill.
 // Spec: docs/specs/2026-11-20-m1b-m2-share-and-claim.md (Task 12, criteria 94–97).
+// A group bill's link opened by someone outside the group (groups T17, A1 S7, GR-25) says "This
+// bill is in a group. Ask for the group's link." with no retry (retrying can't help).
 import { Link, useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import { StyleSheet, Text } from 'react-native';
@@ -8,6 +10,7 @@ import { StyleSheet, Text } from 'react-native';
 import { Centered, Loading } from '@/components/Centered';
 import { Button } from '@/components/ui/Button';
 import { useSession } from '@/lib/auth';
+import { joinBillProblem, type JoinBillProblem } from '@/lib/billGroup';
 import { BILL_ERROR_COPY, joinBill } from '@/lib/bills';
 import { clearPendingInvite, normalizeInviteCode, savePendingInvite } from '@/lib/pendingInvite';
 import { storage } from '@/lib/storage';
@@ -57,7 +60,13 @@ export default function InviteScreen() {
 
 const JOIN_FAILED = "Couldn't join. Try again.";
 
-type JoinState = { status: 'joining' } | { status: 'invalid' } | { status: 'failed' };
+type JoinState = { status: 'joining' } | { status: JoinBillProblem };
+
+const PROBLEM_COPY: Record<JoinBillProblem, string> = {
+  invalid: BILL_ERROR_COPY.invalid_code,
+  in_group: BILL_ERROR_COPY.in_group,
+  failed: JOIN_FAILED,
+};
 
 /**
  * Signed in with a well-formed code: join the bill once (join_bill), then open it. The code from
@@ -85,16 +94,17 @@ function JoinBill({ code }: { code: string }) {
     started.current = attempt;
     void joinBill(code).then((res) => {
       if (!mounted.current) return;
-      if (res.ok) router.replace(`/bills/${res.billId}`);
-      else setState({ status: res.error === 'invalid_code' ? 'invalid' : 'failed' });
+      // withAnchor: the tabs go under the bill, so Back (and the back gesture) reach Tabs (tab-bar spec 32b).
+      if (res.ok) router.replace(`/bills/${res.billId}`, { withAnchor: true });
+      else setState({ status: joinBillProblem(res.error) });
     });
   }, [attempt, code, router]);
 
   if (state.status === 'joining') return <Loading />;
   return (
     <Centered>
-      <Text style={[type.body, styles.message, { color: colors.text }]}>
-        {state.status === 'invalid' ? BILL_ERROR_COPY.invalid_code : JOIN_FAILED}
+      <Text accessibilityRole="alert" style={[type.body, styles.message, { color: colors.text }]}>
+        {PROBLEM_COPY[state.status]}
       </Text>
       {state.status === 'failed' ? (
         <Button
@@ -106,7 +116,7 @@ function JoinBill({ code }: { code: string }) {
           }}
         />
       ) : null}
-      <Button label="Go home" variant={state.status === 'invalid' ? 'primary' : 'ghost'} onPress={() => router.replace('/')} />
+      <Button label="Go home" variant={state.status === 'failed' ? 'ghost' : 'primary'} onPress={() => router.replace('/')} />
     </Centered>
   );
 }

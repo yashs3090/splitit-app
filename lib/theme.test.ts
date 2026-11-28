@@ -1,6 +1,24 @@
 // Design-token invariants and WCAG contrast for the color pairs the shared primitives rely on.
 // Visual pass spec: docs/specs/2026-11-25-visual-pass.md (V1).
-import { colors, googleButtonColors, iconSize, layout, opacity, radius, space, type, type Palette } from './theme';
+import { act, renderHook } from '@testing-library/react-native';
+
+import { colors, googleButtonColors, iconSize, layout, opacity, radius, space, type, type Palette, useTheme } from './theme';
+import { storage as realStorage } from './storage';
+import { PAGE_BACKGROUND, resetThemePreferenceForTests, setThemePreference } from './themePreference';
+import type { MemoryStorage } from '@/test-utils/fakes';
+
+// Keep the store in memory only (no SecureStore under Jest).
+jest.mock('./storage', () => {
+  const { createMemoryStorage } = jest.requireActual<typeof import('@/test-utils/fakes')>('@/test-utils/fakes');
+  return { storage: createMemoryStorage() };
+});
+// jest.mock is hoisted; mockScheme is read lazily, so the factory may name it.
+const mockScheme = jest.fn<'light' | 'dark' | null, []>(() => 'light');
+jest.mock('react-native/Libraries/Utilities/useColorScheme', () => ({
+  __esModule: true,
+  default: () => mockScheme(),
+}));
+
 
 /** WCAG 2.x relative luminance of a #RRGGBB color. */
 function luminance(hex: string): number {
@@ -84,5 +102,90 @@ describe.each(['light', 'dark'] as const)('%s Google button (brand colors)', (sc
   });
   it('stroke is at least 3:1 against the screen background', () => {
     expect(contrast(g.stroke, colors[scheme].background)).toBeGreaterThanOrEqual(3);
+  });
+});
+
+// Feed markers (docs/specs/2026-11-28-tab-bar-and-activity.md Contract M, criterion 19): the dispute
+// tone is a light orange, never `danger` (red stays for app errors). The icon needs 3:1 on its fill;
+// the pair also clears 4.5:1, so text drawn in `dispute` on the fill or the surface would be readable.
+describe.each(['light', 'dark'] as const)('%s dispute tokens', (scheme) => {
+  const c = colors[scheme];
+  it('has the Contract M values', () => {
+    const expected = scheme === 'light' ? { disputeSurface: '#FFF6ED', dispute: '#C4320A' } : { disputeSurface: '#3A1D0B', dispute: '#FDBA8C' };
+    expect({ disputeSurface: c.disputeSurface, dispute: c.dispute }).toEqual(expected);
+  });
+  it('dispute icon is at least 3:1 on disputeSurface', () => {
+    expect(contrast(c.dispute, c.disputeSurface)).toBeGreaterThanOrEqual(3);
+  });
+  it.each(['disputeSurface', 'surface', 'background'] as const)('dispute as text is at least 4.5:1 on %s', (bg) => {
+    expect(contrast(c.dispute, c[bg])).toBeGreaterThanOrEqual(4.5);
+  });
+  it('is not the danger color', () => {
+    expect(c.dispute).not.toBe(c.danger);
+    expect(c.disputeSurface).not.toBe(c.dangerSurface);
+  });
+});
+
+describe('contrast helper (positive control)', () => {
+  it('computes the WCAG ratio of known pairs', () => {
+    expect(contrast('#000000', '#FFFFFF')).toBeCloseTo(21, 5);
+    expect(contrast('#FFFFFF', '#FFFFFF')).toBeCloseTo(1, 5);
+    // A pair known to fail 3:1, so the dispute assertions above can fail.
+    expect(contrast('#FDBA8C', '#FFF6ED')).toBeLessThan(3);
+  });
+});
+
+// Appearance (Auto / Light / Dark): the selected segment of the chooser must stand out from its
+// track on both the Profile card (surface track on surfaceMuted) and the Venmo card (surface track).
+describe.each(['light', 'dark'] as const)('%s Appearance chooser', (scheme) => {
+  const c = colors[scheme];
+  it.each(['surfaceMuted', 'surface'] as const)('the selected segment is at least 3:1 against a %s track', (track) => {
+    expect(contrast(c.primary, c[track])).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe('useTheme follows the Appearance choice', () => {
+  beforeEach(() => {
+    // A choice persists (that's the point), so each case starts from an empty device.
+    (realStorage as unknown as MemoryStorage).data.clear();
+    resetThemePreferenceForTests();
+  });
+
+  it("the web page backgrounds it applies are the theme's", () => {
+    expect(PAGE_BACKGROUND).toEqual({ light: colors.light.background, dark: colors.dark.background });
+  });
+
+  it.each([
+    ['system', 'light', 'light'],
+    ['system', 'dark', 'dark'],
+    ['system', null, 'light'],
+    ['light', 'dark', 'light'],
+    ['dark', 'light', 'dark'],
+  ] as const)('choice %s with the device in %s → %s', async (pref, device, expected) => {
+    mockScheme.mockReturnValue(device);
+    await setThemePreference(pref);
+    const { result } = renderHook(() => useTheme());
+    expect(result.current.scheme).toBe(expected);
+    expect(result.current.colors).toBe(colors[expected]);
+  });
+
+  it('re-renders when the choice changes, in both directions', async () => {
+    mockScheme.mockReturnValue('light');
+    const { result } = renderHook(() => useTheme());
+    expect(result.current.scheme).toBe('light');
+    await act(async () => {
+      await setThemePreference('dark');
+    });
+    expect(result.current.scheme).toBe('dark');
+    expect(result.current.colors.disputeSurface).toBe(colors.dark.disputeSurface);
+    await act(async () => {
+      await setThemePreference('light');
+    });
+    expect(result.current.scheme).toBe('light');
+    mockScheme.mockReturnValue('dark');
+    await act(async () => {
+      await setThemePreference('system');
+    });
+    expect(result.current.scheme).toBe('dark');
   });
 });

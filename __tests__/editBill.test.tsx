@@ -9,6 +9,7 @@ import { Platform, Text } from 'react-native';
 import { supabase as realSupabase } from '@/lib/supabase';
 import { fakeSession, type FakeResult, type FakeSupabase } from '@/test-utils/fakes';
 
+jest.mock('@/lib/tabBadges', () => jest.requireActual<typeof import('@/test-utils/tabBar')>('@/test-utils/tabBar').quietFeedBadges());
 jest.mock('@/lib/supabase', () => {
   const { createFakeSupabase } = jest.requireActual<typeof import('@/test-utils/fakes')>('@/test-utils/fakes');
   return { supabase: createFakeSupabase() };
@@ -50,6 +51,7 @@ const BILL_ROW = {
   total_discount_cents: 0,
   total_cents: 4480,
   join_code: '0123456789abcdef0123',
+  group_id: null, // bills.group_id: fetchBillGroup reads it (a bill in no group)
   created_at: '2026-11-20T19:00:00Z',
   edited_at: null,
   extras_split: 'proportional',

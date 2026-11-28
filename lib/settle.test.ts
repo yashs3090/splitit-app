@@ -1,20 +1,32 @@
 import {
   allZero,
+  balanceFor,
   differenceFor,
   differenceOf,
+  ledgerSettlePlan,
   maySettle,
   NEGATIVE_SHARE_ROLE,
   SETTLE_ALL_ZERO_COPY,
   SETTLE_DIFF_IGNORE_CENTS,
+  settleFactsOf,
   settlePlan,
+  type BillSettlePlan,
+  type SettleBalance,
   type SettleEarly,
   type SettleEarlyEntry,
   type SettleEntry,
+  type SettleLedger,
+  type SettleMark,
   type SettleMarks,
+  type SettleNotReceived,
+  type SettleNotReceivedMap,
   type SettlePlan,
   type SettlePlanWithEarly,
   type SettleReady,
+  type SettleRoutes,
 } from './settle';
+import { currentPlanKey, planKey, settleTransfers, transfersFromReadyPlan, type Payment } from './transfers';
+import type { PaymentMethod } from './paymentMethods';
 import { computeShares, sharesComplete, type ExtrasMode, type SplitClaim, type SplitInput, type SplitItem } from './split';
 
 // Seeded integer-only PRNG (mulberry32), so failures are reproducible.
@@ -31,6 +43,8 @@ function rng(seed: number): (n: number) => number {
 
 const c = (itemId: string, userId: string, parts = 1): SplitClaim => ({ itemId, userId, parts });
 const NO_MARKS: SettleMarks = {};
+/** A mark as fetchBill parses it (sent-via-Venmo D7): to the plan's payer, method 'other' unless said. */
+const mk = (cents: number, at: string, toUserId = 'A', method: PaymentMethod = 'other'): SettleMark => ({ cents, at, method, toUserId });
 
 function ready(plan: SettlePlan): SettleReady {
   if (plan.status !== 'ready') throw new Error(`expected ready, got ${plan.status}`);
@@ -109,22 +123,22 @@ describe('settlePlan: worked example (criterion 32, D3)', () => {
   it('proportional, payer A: Sam owes 1510', () => {
     const plan = ready(settlePlan(worked(), 'A', NO_MARKS));
     expect(plan.payerId).toBe('A');
-    expect(entry(plan, 'B')).toEqual({ userId: 'B', role: 'owes', owedCents: 1510, mark: null });
-    expect(entry(plan, 'A')).toEqual({ userId: 'A', role: 'payer', mark: null });
+    expect(entry(plan, 'B')).toEqual({ userId: 'B', role: 'owes', owedCents: 1510, mark: null, notReceived: null });
+    expect(entry(plan, 'A')).toEqual({ userId: 'A', role: 'payer', mark: null, notReceived: null });
     expect('owedCents' in entry(plan, 'A')).toBe(false);
     expect(plan.collectCents).toBe(1510);
   });
 
   it('proportional, payer B: Hana owes 2090', () => {
     const plan = ready(settlePlan(worked(), 'B', NO_MARKS));
-    expect(entry(plan, 'A')).toEqual({ userId: 'A', role: 'owes', owedCents: 2090, mark: null });
+    expect(entry(plan, 'A')).toEqual({ userId: 'A', role: 'owes', owedCents: 2090, mark: null, notReceived: null });
     expect(entry(plan, 'B').role).toBe('payer');
     expect(plan.collectCents).toBe(2090);
   });
 
   it('even, payer A: Sam owes 1550', () => {
     const plan = ready(settlePlan(worked('equal'), 'A', NO_MARKS));
-    expect(entry(plan, 'B')).toEqual({ userId: 'B', role: 'owes', owedCents: 1550, mark: null });
+    expect(entry(plan, 'B')).toEqual({ userId: 'B', role: 'owes', owedCents: 1550, mark: null, notReceived: null });
   });
 
   it('three-way tie: the lowest user id gets the spare cent and owes it', () => {
@@ -152,7 +166,7 @@ describe('settlePlan: roles (criterion 34)', () => {
   it('a participant with no claims owes nothing', () => {
     const input = { ...worked(), participantIds: ['A', 'B', 'D'] };
     const plan = ready(settlePlan(input, 'A', NO_MARKS));
-    expect(entry(plan, 'D')).toEqual({ userId: 'D', role: 'nothing', owedCents: 0, mark: null });
+    expect(entry(plan, 'D')).toEqual({ userId: 'D', role: 'nothing', owedCents: 0, mark: null, notReceived: null });
     expect(plan.owingCount).toBe(1);
   });
 
@@ -185,7 +199,7 @@ describe('settlePlan: roles (criterion 34)', () => {
     };
     expect(NEGATIVE_SHARE_ROLE).toBe('payer_owes_them'); // Q6 option A
     const plan = ready(settlePlan(input, 'A', NO_MARKS));
-    expect(entry(plan, 'B')).toEqual({ userId: 'B', role: 'payer_owes_them', owedCents: -100, mark: null });
+    expect(entry(plan, 'B')).toEqual({ userId: 'B', role: 'payer_owes_them', owedCents: -100, mark: null, notReceived: null });
     expect(plan.collectCents).toBe(0); // only positive amounts are collected
     expect(plan.owingCount).toBe(0);
 
@@ -208,8 +222,8 @@ describe('settlePlan: marks (criterion 35)', () => {
     participantIds: ['A', 'B', 'D', 'E'],
     extrasMode: 'proportional',
   };
-  const markB = { cents: 500, at: '2026-11-24T10:00:00Z' };
-  const markD = { cents: 300, at: '2026-11-24T10:05:00Z' };
+  const markB = mk(500, '2026-11-24T10:00:00Z');
+  const markD = mk(300, '2026-11-24T10:05:00Z');
 
   it('no marks', () => {
     const plan = ready(settlePlan(input, 'A', NO_MARKS));
@@ -229,13 +243,13 @@ describe('settlePlan: marks (criterion 35)', () => {
   });
 
   it("a mark on someone whose role is 'nothing' doesn't count", () => {
-    const plan = ready(settlePlan(input, 'A', { B: markB, E: { cents: 100, at: '2026-11-24T10:06:00Z' } }));
+    const plan = ready(settlePlan(input, 'A', { B: markB, E: mk(100, '2026-11-24T10:06:00Z') }));
     expect(entry(plan, 'E')).toMatchObject({ role: 'nothing', mark: { cents: 100 } });
     expect(plan).toMatchObject({ paidCount: 1, owingCount: 2, allPaid: false });
   });
 
   it('a mark keeps its own cents even when the share has changed since', () => {
-    const plan = ready(settlePlan(input, 'A', { B: { cents: 450, at: '2026-11-24T10:00:00Z' } }));
+    const plan = ready(settlePlan(input, 'A', { B: mk(450, '2026-11-24T10:00:00Z') }));
     expect(entry(plan, 'B')).toMatchObject({ owedCents: 500, mark: { cents: 450 } });
     expect(plan.paidCount).toBe(1);
   });
@@ -261,7 +275,7 @@ describe('settlePlan: every item $0 in proportional mode (Q10)', () => {
   it('is blocked_all_zero, with no amounts', () => {
     expect(computeShares(allZero).unclaimedCents).toBe(500); // the cause
     expect(settlePlan(allZero, 'A', NO_MARKS)).toEqual({ status: 'blocked_all_zero' });
-    expect(settlePlan(allZero, 'B', { A: { cents: 100, at: '2026-11-24T10:00:00Z' } })).toEqual({
+    expect(settlePlan(allZero, 'B', { A: mk(100, '2026-11-24T10:00:00Z', 'B') })).toEqual({
       status: 'blocked_all_zero',
     });
   });
@@ -400,7 +414,7 @@ describe('settlePlan: property test (criterion 33)', () => {
 });
 
 describe('settlePlan: share changed since the mark (criterion 41a, Q3 A)', () => {
-  const MARK = { cents: 1510, at: '2026-11-24T10:00:00Z' };
+  const MARK = mk(1510, '2026-11-24T10:00:00Z');
   /** Payer A; B's current share is exactly `bCents` (no extras), or one of the special shapes. */
   function planWithB(bCents: number | 'none' | 'negative'): SettleReady {
     if (bCents === 'negative') {
@@ -486,8 +500,8 @@ describe('settlePlan: an added person who claims nothing (SP1–SP3)', () => {
   it("SP1 proportional: Cy is 'nothing' with 0, Sam still owes 1510 to Hana", () => {
     const input = withCy('proportional');
     const plan = ready(settlePlan(input, 'A', NO_MARKS));
-    expect(entry(plan, 'C')).toEqual({ userId: 'C', role: 'nothing', owedCents: 0, mark: null });
-    expect(entry(plan, 'B')).toEqual({ userId: 'B', role: 'owes', owedCents: 1510, mark: null });
+    expect(entry(plan, 'C')).toEqual({ userId: 'C', role: 'nothing', owedCents: 0, mark: null, notReceived: null });
+    expect(entry(plan, 'B')).toEqual({ userId: 'B', role: 'owes', owedCents: 1510, mark: null, notReceived: null });
     expect(plan.collectCents).toBe(1510);
     expect(plan.owingCount).toBe(1);
     expectInvariant(input, plan);
@@ -496,14 +510,14 @@ describe('settlePlan: an added person who claims nothing (SP1–SP3)', () => {
   it("SP2 even: Cy is 'nothing'; Sam owes 1550 (extras split between the 2 claimers only)", () => {
     const input = withCy('equal');
     const plan = ready(settlePlan(input, 'A', NO_MARKS));
-    expect(entry(plan, 'C')).toEqual({ userId: 'C', role: 'nothing', owedCents: 0, mark: null });
-    expect(entry(plan, 'B')).toEqual({ userId: 'B', role: 'owes', owedCents: 1550, mark: null });
+    expect(entry(plan, 'C')).toEqual({ userId: 'C', role: 'nothing', owedCents: 0, mark: null, notReceived: null });
+    expect(entry(plan, 'B')).toEqual({ userId: 'B', role: 'owes', owedCents: 1550, mark: null, notReceived: null });
     expect(plan.owingCount).toBe(1);
     expectInvariant(input, plan);
   });
 
   it('SP1/SP2: Cy never blocks "all paid" once Sam has marked', () => {
-    const plan = ready(settlePlan(withCy('proportional'), 'A', { B: { cents: 1510, at: '2026-11-24T10:00:00Z' } }));
+    const plan = ready(settlePlan(withCy('proportional'), 'A', { B: mk(1510, '2026-11-24T10:00:00Z') }));
     expect(plan.allPaid).toBe(true);
   });
 
@@ -717,7 +731,7 @@ describe('maySettle: rule E boundary table (criterion 16)', () => {
   });
 
   it('[E13] the even switch blocks the plan, mark or not', () => {
-    const mark = { B: { cents: 1000, at: '2026-11-25T10:00:00Z' } };
+    const mark = { B: mk(1000, '2026-11-25T10:00:00Z') };
     expect(settlePlan(e1(EVEN), 'A', mark, { allowEarly: true })).toEqual({ status: 'blocked', unclaimedRows: 1, unclaimedDiscountRows: 0 });
   });
 
@@ -759,7 +773,7 @@ describe('settlePlan with and without allowEarly (criterion 18, D2 table)', () =
     const plan = early(settlePlan(kInput('proportional'), 'A', NO_MARKS, { allowEarly: true }));
     expect(plan).toMatchObject({ status: 'early', payerId: 'A', unclaimedRows: 1, unclaimedDiscountRows: 0 });
     expect(anyEntry(plan, 'B')).toMatchObject({ canSettle: true });
-    expect(anyEntry(plan, 'A')).toEqual({ userId: 'A', role: 'payer', mark: null });
+    expect(anyEntry(plan, 'A')).toEqual({ userId: 'A', role: 'payer', mark: null, notReceived: null });
   });
 
   it('even K2 → blocked', () => {
@@ -785,7 +799,7 @@ describe('settlePlan with and without allowEarly (criterion 18, D2 table)', () =
 
   it('K1 → ready, identical to the plan without options', () => {
     const input = kBill(K_ITEMS, K_ALL_CLAIMED);
-    const marks = { B: { cents: 1, at: '2026-11-25T10:00:00Z' } };
+    const marks = { B: mk(1, '2026-11-25T10:00:00Z') };
     expect(settlePlan(input, 'A', marks, { allowEarly: true })).toEqual(settlePlan(input, 'A', marks));
     expect(settlePlan(input, 'A', marks).status).toBe('ready');
   });
@@ -800,8 +814,8 @@ describe('settlePlan with and without allowEarly (criterion 18, D2 table)', () =
     const shares = computeShares(input);
     const owedB = shares.people.find((p) => p.userId === 'B')!.totalCents;
     expect(plan.people.map((p) => p.userId)).toEqual(['A', 'B', 'D']);
-    expect(anyEntry(plan, 'B')).toEqual({ userId: 'B', role: 'owes', owedCents: owedB, mark: null, canSettle: true });
-    expect(anyEntry(plan, 'D')).toEqual({ userId: 'D', role: 'nothing', owedCents: 0, mark: null, canSettle: false });
+    expect(anyEntry(plan, 'B')).toEqual({ userId: 'B', role: 'owes', owedCents: owedB, mark: null, notReceived: null, canSettle: true });
+    expect(anyEntry(plan, 'D')).toEqual({ userId: 'D', role: 'nothing', owedCents: 0, mark: null, notReceived: null, canSettle: false });
     // Extras 500 over weights A 1500, B 1000, unclaimed 600 (Σ 3100): floors 241/161/96, the 2 spare cents
     // go to the larger remainders (A .93, unclaimed .77), so B keeps 161.
     expect(owedB).toBe(1161);
@@ -809,7 +823,7 @@ describe('settlePlan with and without allowEarly (criterion 18, D2 table)', () =
 });
 
 describe('difference (criterion 19, D4 rows D1–D7)', () => {
-  const MARK = { cents: 1510, at: '2026-11-25T10:00:00Z' };
+  const MARK = mk(1510, '2026-11-25T10:00:00Z');
   /** Payer A; B's current share is exactly `share` (no extras), 0 with no claims, or -100 in even mode. */
   function planWithShare(share: number | 'none' | 'negative', marks: SettleMarks = { B: MARK }): SettleReady {
     if (share === 'negative') {
@@ -866,7 +880,7 @@ describe('difference (criterion 19, D4 rows D1–D7)', () => {
 
   it("the payer never has a difference, even when marked (the DB doesn't store one, but lib is defensive)", () => {
     const plan = planWithShare(1620, { B: MARK, A: MARK });
-    expect(anyEntry(plan, 'A')).toEqual({ userId: 'A', role: 'payer', mark: MARK });
+    expect(anyEntry(plan, 'A')).toEqual({ userId: 'A', role: 'payer', mark: MARK, notReceived: null });
     expect(diffOf(plan, 'A')).toBeNull();
   });
 
@@ -1102,5 +1116,565 @@ describe('settle early: property tests (criterion 17)', () => {
     expect(splits).toBeGreaterThan(20);
     expect(zeroWeight).toBeGreaterThan(5);
     expect(moved).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sent via Venmo, Task 3 (docs/specs/2026-11-26-sent-via-venmo.md D4, D7, §11): marks carry their
+// method and who they're to; every entry carries the viewer-independent "Not received" flag.
+// ---------------------------------------------------------------------------
+
+describe('sent via Venmo: method, toUserId and notReceived on plan entries', () => {
+  const AT = '2026-11-26T08:15:42.987654+00:00';
+  const FLAG: SettleNotReceived = { cents: 1510, method: 'venmo', toUserId: 'A' };
+  // A pays; B owes 1000 (salad 1000 + half of nothing), complete and proportional.
+  const input: SplitInput = {
+    totalCents: 2500,
+    items: [
+      { id: 'a', totalCents: 1500 },
+      { id: 'b', totalCents: 1000 },
+    ],
+    claims: [c('a', 'A'), c('b', 'B')],
+    participantIds: ['A', 'B', 'D'],
+    extrasMode: 'proportional',
+  };
+  const incomplete: SplitInput = { ...input, items: [...input.items, { id: 'd', totalCents: 500 }], totalCents: 3000 };
+
+  it('passes each mark through with its method and toUserId (ready and early)', () => {
+    const venmo = mk(1000, AT, 'A', 'venmo');
+    const plan = ready(settlePlan(input, 'A', { B: venmo }));
+    expect(entry(plan, 'B').mark).toEqual({ cents: 1000, at: AT, method: 'venmo', toUserId: 'A' });
+    const e = early(settlePlan(incomplete, 'A', { B: mk(1000, AT, 'A', 'cash') }, { allowEarly: true }));
+    expect(anyEntry(e, 'B').mark).toEqual({ cents: 1000, at: AT, method: 'cash', toUserId: 'A' });
+  });
+
+  it('every entry, the payer included, has notReceived null when no flags are given', () => {
+    for (const plan of [ready(settlePlan(input, 'A', NO_MARKS)), early(settlePlan(incomplete, 'A', NO_MARKS, { allowEarly: true }))]) {
+      expect(plan.people.map((p) => [p.userId, p.notReceived])).toEqual([
+        ['A', null],
+        ['B', null],
+        ['D', null],
+      ]);
+    }
+  });
+
+  it('puts each person’s flag on their own entry, ready and early', () => {
+    const notReceived = { B: FLAG, D: null };
+    const plan = ready(settlePlan(input, 'A', NO_MARKS, { notReceived }));
+    expect(entry(plan, 'B').notReceived).toEqual(FLAG);
+    expect(entry(plan, 'D').notReceived).toBeNull();
+    expect(entry(plan, 'A').notReceived).toBeNull();
+    const e = early(settlePlan(incomplete, 'A', NO_MARKS, { allowEarly: true, notReceived }));
+    expect(anyEntry(e, 'B').notReceived).toEqual(FLAG);
+  });
+
+  it('a flag is not a mark: amounts and counts are the same with or without it', () => {
+    const without = ready(settlePlan(input, 'A', NO_MARKS));
+    const withFlag = ready(settlePlan(input, 'A', NO_MARKS, { notReceived: { B: FLAG } }));
+    expect(withFlag).toMatchObject({ collectCents: without.collectCents, paidCount: 0, owingCount: 1, allPaid: false });
+    expect(entry(withFlag, 'B')).toMatchObject({ role: 'owes', owedCents: 1000, mark: null });
+  });
+
+  it('a flag naming a former payer is kept as given (the view compares toUserId with payerId)', () => {
+    const old: SettleNotReceived = { cents: 900, method: 'cash', toUserId: 'D' };
+    const plan = ready(settlePlan(input, 'A', NO_MARKS, { notReceived: { B: old } }));
+    expect(entry(plan, 'B').notReceived).toEqual(old);
+  });
+
+  it('blocked plans have no entries, whatever the flags', () => {
+    expect(settlePlan(incomplete, 'A', NO_MARKS, { notReceived: { B: FLAG } })).toEqual({
+      status: 'blocked',
+      unclaimedRows: 1,
+      unclaimedDiscountRows: 0,
+    });
+  });
+
+  it('settleFactsOf builds the marks and flags maps from fetched participants', () => {
+    const venmo = mk(1000, AT, 'A', 'venmo');
+    expect(
+      settleFactsOf([
+        { userId: 'A', mark: null, notReceived: null },
+        { userId: 'B', mark: venmo, notReceived: null },
+        { userId: 'D', mark: null, notReceived: FLAG },
+      ]),
+    ).toEqual({ marks: { A: null, B: venmo, D: null }, notReceived: { A: null, B: null, D: FLAG } });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Who paid, Task 6 (docs/specs/2026-11-26-who-paid.md, Amendment A1; eng review S2, S8, N8):
+// ledgerSettlePlan over BillData's payers / payments / flags, rule E′, and balanceFor.
+// ---------------------------------------------------------------------------
+
+const WT0 = '2026-11-26T10:00:00.000001+00:00';
+const WT1 = '2026-11-26T10:00:01.000001+00:00';
+const WT2 = '2026-11-26T10:00:02.000001+00:00';
+
+let wpSeq = 0;
+/** A bill_payments entry. planKey null = made under an earlier state. */
+function wpay(fromId: string, toId: string, cents: number, opts: { at?: string; key?: string | null; method?: PaymentMethod } = {}): Payment {
+  wpSeq += 1;
+  return {
+    id: `20000000-0000-4000-8000-${String(wpSeq).padStart(12, '0')}`,
+    fromId,
+    toId,
+    cents,
+    method: opts.method ?? 'venmo',
+    planKey: opts.key ?? null,
+    at: opts.at ?? WT0,
+  };
+}
+
+/**
+ * A bill where each person's share is exactly one row they claim (negative = a claimed discount),
+ * plus an optional unclaimed item and extra participants with no claims. No extras, so the shares
+ * are the rows as given.
+ */
+function sharesBill(
+  shares: Record<string, number>,
+  opts: { unclaimed?: number; extra?: string[]; extrasMode?: ExtrasMode } = {},
+): SplitInput {
+  const items: SplitItem[] = [];
+  const claims: SplitClaim[] = [];
+  for (const [userId, cents] of Object.entries(shares)) {
+    items.push({ id: `row-${userId}`, totalCents: cents, kind: cents < 0 ? 'discount' : 'item' });
+    claims.push(c(`row-${userId}`, userId));
+  }
+  if (opts.unclaimed) items.push({ id: 'unclaimed', totalCents: opts.unclaimed, kind: 'item' });
+  const totalCents = items.reduce((sum, i) => sum + i.totalCents, 0);
+  const participantIds = [...Object.keys(shares), ...(opts.extra ?? [])].sort();
+  return { totalCents, items, claims, participantIds, extrasMode: opts.extrasMode ?? PROP };
+}
+
+function ledger(payerId: string, rest: Partial<Omit<SettleLedger, 'payerId'>> = {}): SettleLedger {
+  return { payerId, payers: rest.payers ?? [], payments: rest.payments ?? [], flags: rest.flags ?? [] };
+}
+
+function routes(plan: BillSettlePlan): SettleRoutes {
+  if (plan.status !== 'routes') throw new Error(`expected routes, got ${plan.status}`);
+  return plan;
+}
+
+const pairsOf = (plan: SettleRoutes) =>
+  plan.pairs.map((p) => ({ fromId: p.fromId, toId: p.toId, targetCents: p.targetCents, paidCents: p.paidCents, remainingCents: p.remainingCents }));
+
+function known(b: SettleBalance): { owesCents: number; owedCents: number; final: boolean } {
+  if (!b.known) throw new Error('expected a known balance');
+  return { owesCents: b.owesCents, owedCents: b.owedCents, final: b.final };
+}
+
+/** Σ owes = Σ owed over every participant (a balance is always between two people in the plan). */
+function expectBalancesAddUp(plan: BillSettlePlan, ids: readonly string[]): void {
+  let owes = 0;
+  let owed = 0;
+  for (const id of ids) {
+    const b = balanceFor(plan, id);
+    if (!b.known) continue;
+    owes += b.owesCents;
+    owed += b.owedCents;
+  }
+  expect(owes).toBe(owed);
+}
+
+describe('ledgerSettlePlan: several payers (routes)', () => {
+  it('T1: two payers, one ower: the ower pays each payer what they are short', () => {
+    const split = sharesBill({ A: 3341, B: 3340, C: 3340 });
+    const payers = [
+      { userId: 'A', paidCents: 6000 },
+      { userId: 'B', paidCents: 4021 },
+    ];
+    const { plan, planKey: key } = ledgerSettlePlan(split, ledger('A', { payers }));
+    const r = routes(plan);
+    expect(r.mode).toBe('split');
+    expect(r.leadId).toBe('A');
+    expect(r.payers).toEqual(payers);
+    expect(r.early).toBeNull();
+    expect(pairsOf(r)).toEqual([
+      { fromId: 'C', toId: 'A', targetCents: 2659, paidCents: 0, remainingCents: 2659 },
+      { fromId: 'C', toId: 'B', targetCents: 681, paidCents: 0, remainingCents: 681 },
+    ]);
+    expect(r.outside).toEqual([]);
+    expect(r.allPaid).toBe(false);
+    expect(r.people).toEqual([
+      { userId: 'A', paidCents: 6000, shareCents: 3341, canSettle: true },
+      { userId: 'B', paidCents: 4021, shareCents: 3340, canSettle: true },
+      { userId: 'C', paidCents: 0, shareCents: 3340, canSettle: true },
+    ]);
+    // The key is contract T's, and the one Task 10's mark_paid stamps.
+    const want = settleTransfers({
+      mode: 'split',
+      leadId: 'A',
+      payers,
+      shares: [
+        { userId: 'A', shareCents: 3341 },
+        { userId: 'B', shareCents: 3340 },
+        { userId: 'C', shareCents: 3340 },
+      ],
+      entries: [],
+    });
+    expect(key).toBe(want.key);
+    expect(r.key).toBe(want.key);
+    expect(known(balanceFor(plan, 'C'))).toEqual({ owesCents: 3340, owedCents: 0, final: true });
+    expect(known(balanceFor(plan, 'A'))).toEqual({ owesCents: 0, owedCents: 2659, final: true });
+    expect(known(balanceFor(plan, 'B'))).toEqual({ owesCents: 0, owedCents: 681, final: true });
+    expectBalancesAddUp(plan, split.participantIds);
+  });
+
+  it('T5: a payer whose share is more than they paid pays the other payers', () => {
+    const split = sharesBill({ A: 8000, B: 1000, E: 1000 });
+    const payers = [
+      { userId: 'A', paidCents: 5000 },
+      { userId: 'B', paidCents: 3000 },
+      { userId: 'E', paidCents: 2000 },
+    ];
+    const { plan } = ledgerSettlePlan(split, ledger('A', { payers }));
+    expect(pairsOf(routes(plan))).toEqual([
+      { fromId: 'A', toId: 'B', targetCents: 2000, paidCents: 0, remainingCents: 2000 },
+      { fromId: 'A', toId: 'E', targetCents: 1000, paidCents: 0, remainingCents: 1000 },
+    ]);
+    expect(known(balanceFor(plan, 'A'))).toEqual({ owesCents: 3000, owedCents: 0, final: true });
+    expect(known(balanceFor(plan, 'B'))).toEqual({ owesCents: 0, owedCents: 2000, final: true });
+    expectBalancesAddUp(plan, split.participantIds);
+  });
+
+  it('T2/T9: a payment on the current key changes only its pair; a stale-key payment re-plans', () => {
+    const split = sharesBill({ A: 2500, B: 2500, C: 2500, D: 2500 });
+    const payers = [
+      { userId: 'A', paidCents: 5000 },
+      { userId: 'B', paidCents: 5000 },
+    ];
+    const first = ledgerSettlePlan(split, ledger('A', { payers }));
+    expect(pairsOf(routes(first.plan))).toEqual([
+      { fromId: 'C', toId: 'A', targetCents: 2500, paidCents: 0, remainingCents: 2500 },
+      { fromId: 'D', toId: 'B', targetCents: 2500, paidCents: 0, remainingCents: 2500 },
+    ]);
+    const k0 = first.planKey;
+    if (k0 === null) throw new Error('expected a key');
+
+    // C pays B (the wrong payer) under K0: the key stays, B now owes C it back.
+    const wrong = wpay('C', 'B', 2500, { key: k0, at: WT1 });
+    const second = ledgerSettlePlan(split, ledger('A', { payers, payments: [wrong] }));
+    expect(second.planKey).toBe(k0);
+    const cb = routes(second.plan).pairs.find((p) => p.fromId === 'C' && p.toId === 'B');
+    expect(cb).toMatchObject({ targetCents: 0, paidCents: 2500, remainingCents: -2500, difference: { kind: 'back', cents: 2500 } });
+    expect(cb?.mark).toEqual({ cents: 2500, at: WT1, method: 'venmo' });
+
+    // Then C pays A part of what they owe, still under K0.
+    const part = wpay('C', 'A', 1000, { key: k0, at: WT2 });
+    const third = ledgerSettlePlan(split, ledger('A', { payers, payments: [wrong, part] }));
+    expect(third.planKey).toBe(k0);
+    const ca = routes(third.plan).pairs.find((p) => p.fromId === 'C' && p.toId === 'A');
+    expect(ca).toMatchObject({ targetCents: 2500, paidCents: 1000, remainingCents: 1500, difference: { kind: 'more', cents: 1500 } });
+    expectBalancesAddUp(third.plan, split.participantIds);
+
+    // The same payment made under an earlier state gives a new key.
+    const stale = ledgerSettlePlan(split, ledger('A', { payers, payments: [wpay('C', 'B', 2500, { at: WT1 })] }));
+    expect(stale.planKey).not.toBe(k0);
+  });
+
+  it('T4: a negative share is an outside route from the lead and never counts in a balance', () => {
+    const split = sharesBill({ A: 3000, B: 3000, C: 4100, D: -100 });
+    const payers = [
+      { userId: 'A', paidCents: 6000 },
+      { userId: 'B', paidCents: 4000 },
+    ];
+    const { plan } = ledgerSettlePlan(split, ledger('A', { payers }));
+    const r = routes(plan);
+    expect(pairsOf(r)).toEqual([
+      { fromId: 'C', toId: 'A', targetCents: 3100, paidCents: 0, remainingCents: 3100 },
+      { fromId: 'C', toId: 'B', targetCents: 1000, paidCents: 0, remainingCents: 1000 },
+    ]);
+    expect(r.outside).toEqual([{ fromId: 'A', toId: 'D', cents: 100 }]);
+    expect(known(balanceFor(plan, 'D'))).toEqual({ owesCents: 0, owedCents: 0, final: true });
+    expect(known(balanceFor(plan, 'A'))).toEqual({ owesCents: 0, owedCents: 3100, final: true });
+    expectBalancesAddUp(plan, split.participantIds);
+  });
+
+  it('allPaid once every pair is paid within tolerance', () => {
+    const split = sharesBill({ A: 3341, B: 3340, C: 3340 });
+    const payers = [
+      { userId: 'A', paidCents: 6000 },
+      { userId: 'B', paidCents: 4021 },
+    ];
+    const k = ledgerSettlePlan(split, ledger('A', { payers })).planKey ?? '';
+    const payments = [wpay('C', 'A', 2659, { key: k }), wpay('C', 'B', 680, { key: k, at: WT1 })];
+    const { plan } = ledgerSettlePlan(split, ledger('A', { payers, payments }));
+    expect(routes(plan).allPaid).toBe(true);
+    expect(known(balanceFor(plan, 'C'))).toEqual({ owesCents: 0, owedCents: 0, final: true });
+    const short = ledgerSettlePlan(split, ledger('A', { payers, payments: payments.slice(0, 1) }));
+    expect(routes(short.plan).allPaid).toBe(false);
+  });
+
+  it('carries the flags as fetched', () => {
+    const split = sharesBill({ A: 3341, B: 3340, C: 3340 });
+    const payers = [
+      { userId: 'A', paidCents: 6000 },
+      { userId: 'B', paidCents: 4021 },
+    ];
+    const flags = [{ fromId: 'C', toId: 'B', cents: 681, method: 'cash' as const }];
+    expect(routes(ledgerSettlePlan(split, ledger('A', { payers, flags })).plan).flags).toEqual(flags);
+  });
+});
+
+describe('ledgerSettlePlan: one payer with history (routes)', () => {
+  // T0: Priya (P) paid Sam (S) when Sam was the payer; the payer is now You (Y).
+  const t0 = () => sharesBill({ P: 1200, S: 1400, Y: 1400 });
+
+  it('T0: money paid to an earlier payer passes on to the current one', () => {
+    const { plan, planKey: key } = ledgerSettlePlan(t0(), ledger('Y', { payments: [wpay('P', 'S', 1200)] }));
+    const r = routes(plan);
+    expect(r.mode).toBe('one');
+    expect(r.payers).toEqual([{ userId: 'Y', paidCents: 4000 }]);
+    expect(r.pairs).toEqual([
+      {
+        fromId: 'P',
+        toId: 'S',
+        targetCents: 1200,
+        paidCents: 1200,
+        remainingCents: 0,
+        mark: { cents: 1200, at: WT0, method: 'venmo' },
+        difference: null,
+      },
+      { fromId: 'S', toId: 'Y', targetCents: 2600, paidCents: 0, remainingCents: 2600, mark: null, difference: null },
+    ]);
+    const held = { kind: 'passed_on', senderId: 'P', holderId: 'S', cents: 1200, onwardIds: ['Y'] };
+    expect(r.provenance).toEqual({ heldFor: { S: [held] }, passedOnBy: { P: [held] } });
+    expect(key).toBe(r.key);
+    expect(known(balanceFor(plan, 'S'))).toEqual({ owesCents: 2600, owedCents: 0, final: true });
+    expect(known(balanceFor(plan, 'Y'))).toEqual({ owesCents: 0, owedCents: 2600, final: true });
+    expect(known(balanceFor(plan, 'P'))).toEqual({ owesCents: 0, owedCents: 0, final: true });
+  });
+
+  it('T0 early: proportional and incomplete → early routes; even mode or no allowEarly → blocked', () => {
+    const shares = { P: 1200, S: 1400, Y: 1400 };
+    const l = ledger('Y', { payments: [wpay('P', 'S', 1200)] });
+    const split = sharesBill(shares, { unclaimed: 1000, extra: ['Q'] });
+    const r = routes(ledgerSettlePlan(split, l, { allowEarly: true }).plan);
+    expect(r.early).toEqual({ unclaimedRows: 1, unclaimedDiscountRows: 0 });
+    expect(r.people.find((p) => p.userId === 'Q')).toEqual({ userId: 'Q', paidCents: 0, shareCents: 0, canSettle: false });
+    expect(r.people.find((p) => p.userId === 'S')?.canSettle).toBe(true);
+    // The unclaimed 1000 counts as the payer's for routing: S still owes Y 2600.
+    expect(pairsOf(r).find((p) => p.fromId === 'S')).toEqual({ fromId: 'S', toId: 'Y', targetCents: 2600, paidCents: 0, remainingCents: 2600 });
+    expect(known(balanceFor(r, 'S'))).toEqual({ owesCents: 2600, owedCents: 0, final: false });
+
+    const even = sharesBill(shares, { unclaimed: 1000, extrasMode: 'equal' });
+    expect(ledgerSettlePlan(even, l, { allowEarly: true })).toEqual({
+      plan: { status: 'blocked', unclaimedRows: 1, unclaimedDiscountRows: 0 },
+      planKey: null,
+    });
+    expect(ledgerSettlePlan(split, l).plan).toEqual({ status: 'blocked', unclaimedRows: 1, unclaimedDiscountRows: 0 });
+  });
+
+  it('a payer who paid someone back more than they sent (net < 0 to the payer) gets routes', () => {
+    const split = sharesBill({ A: 1000, B: 1000 });
+    const { plan } = ledgerSettlePlan(split, ledger('A', { payments: [wpay('A', 'B', 500)] }));
+    const r = routes(plan);
+    // Positions: A 2000 − 1000 + 500 = 1500, B −1000 − 500 = −1500, so B → A 1500 on top of the −500.
+    expect(r.pairs).toEqual([{ fromId: 'B', toId: 'A', targetCents: 1000, paidCents: -500, remainingCents: 1500, mark: null, difference: null }]);
+    expect(known(balanceFor(plan, 'B'))).toEqual({ owesCents: 1500, owedCents: 0, final: true });
+    expect(known(balanceFor(plan, 'A'))).toEqual({ owesCents: 0, owedCents: 1500, final: true });
+    expectBalancesAddUp(plan, split.participantIds);
+  });
+});
+
+describe('ledgerSettlePlan: stale payers (S8)', () => {
+  const payersOf = (b: number) => [
+    { userId: 'A', paidCents: 5000 },
+    { userId: 'B', paidCents: b },
+  ];
+  const split = () => sharesBill({ A: 2500, B: 2500, C: 5000 });
+
+  it.each([
+    [5001, -1],
+    [4999, 1],
+  ])('B paid %i of 10000 → blocked_payers with gap %i, and no key', (b, gap) => {
+    expect(ledgerSettlePlan(split(), ledger('A', { payers: payersOf(b) }))).toEqual({
+      // payers lead first (payersState): the larger amount, then by id.
+      plan: { status: 'blocked_payers', leadId: 'A', payers: [...payersOf(b)].sort((x, y) => y.paidCents - x.paidCents), gapCents: gap, assignedCents: 5000 + b, totalCents: 10000 },
+      planKey: null,
+    });
+    expect(balanceFor(ledgerSettlePlan(split(), ledger('A', { payers: payersOf(b) })).plan, 'C')).toEqual({ known: false });
+  });
+
+  it('the exact sum → routes', () => {
+    expect(ledgerSettlePlan(split(), ledger('A', { payers: payersOf(5000) })).plan.status).toBe('routes');
+  });
+
+  it('stale wins over all-$0 and over an incomplete bill', () => {
+    const zero: SplitInput = {
+      totalCents: 1000,
+      items: [{ id: 'x', totalCents: 0 }],
+      claims: [c('x', 'A'), c('x', 'B')],
+      participantIds: ['A', 'B'],
+      extrasMode: PROP,
+    };
+    const stale = [
+      { userId: 'A', paidCents: 500 },
+      { userId: 'B', paidCents: 501 },
+    ];
+    const exact = [
+      { userId: 'A', paidCents: 500 },
+      { userId: 'B', paidCents: 500 },
+    ];
+    expect(ledgerSettlePlan(zero, ledger('A', { payers: stale }), { allowEarly: true }).plan.status).toBe('blocked_payers');
+    expect(ledgerSettlePlan(zero, ledger('A', { payers: exact }), { allowEarly: true }).plan).toEqual({ status: 'blocked_all_zero' });
+    const incomplete = sharesBill({ A: 2500, B: 2500 }, { unclaimed: 5000 });
+    expect(ledgerSettlePlan(incomplete, ledger('A', { payers: payersOf(5001) }), { allowEarly: true }).plan.status).toBe('blocked_payers');
+  });
+});
+
+describe("rule E′: no settling early when the paying is split", () => {
+  const split = () => sharesBill({ A: 2500, B: 2500 }, { unclaimed: 5000 });
+  const payers = [
+    { userId: 'A', paidCents: 5000 },
+    { userId: 'B', paidCents: 5000 },
+  ];
+
+  it('split + incomplete → blocked even with allowEarly; the same bill with one payer is early', () => {
+    expect(ledgerSettlePlan(split(), ledger('A', { payers }), { allowEarly: true })).toEqual({
+      plan: { status: 'blocked', unclaimedRows: 1, unclaimedDiscountRows: 0 },
+      planKey: null,
+    });
+    expect(ledgerSettlePlan(split(), ledger('A'), { allowEarly: true }).plan.status).toBe('early');
+  });
+
+  it('maySettle: split → not_complete, one → early; all_zero wins in both', () => {
+    expect(maySettle(split(), 'B', 'split')).toBe('not_complete');
+    expect(maySettle(split(), 'B', 'one')).toBe('early');
+    expect(maySettle(split(), 'B')).toBe('early');
+    const zero: SplitInput = { totalCents: 1000, items: [{ id: 'x', totalCents: 0 }, { id: 'y', totalCents: 0 }], claims: [c('x', 'A')], participantIds: ['A', 'B'], extrasMode: PROP };
+    expect(maySettle(zero, 'A', 'split')).toBe('all_zero');
+    expect(maySettle(zero, 'A', 'one')).toBe('all_zero');
+    expect(maySettle(sharesBill({ A: 2500, B: 2500 }), 'B', 'split')).toBe('final');
+  });
+});
+
+describe('ledgerSettlePlan: one payer, every payment to or from them (today\'s plan)', () => {
+  it('a payment to the payer is today\'s mark', () => {
+    const split = worked();
+    const payments = [wpay('B', 'A', 1000, { at: WT1 })];
+    const got = ledgerSettlePlan(split, ledger('A', { payments }), { allowEarly: true });
+    expect(got.plan).toStrictEqual(settlePlan(split, 'A', { B: mk(1000, WT1, 'A', 'venmo') }, { allowEarly: true, notReceived: {} }));
+    const shares = computeShares(split).people.map((p) => ({ userId: p.userId, shareCents: p.totalCents }));
+    const w = { mode: 'one' as const, leadId: 'A', payers: [{ userId: 'A', paidCents: 3600 }], shares };
+    // The key a payment from this screen is stamped with: contract T's, over the entries.
+    expect(got.planKey).toBe(currentPlanKey({ ...w, entries: [...payments] }));
+    // With no payments at all it is planKey exactly.
+    expect(ledgerSettlePlan(split, ledger('A'), { allowEarly: true }).planKey).toBe(planKey(w));
+  });
+
+  it('each flag is its sender\'s notReceived, the one to the payer first (as fetched today)', () => {
+    const split = sharesBill({ A: 1000, B: 1000, C: 1000 });
+    const flags = [
+      { fromId: 'B', toId: 'C', cents: 700, method: 'venmo' as const },
+      { fromId: 'B', toId: 'A', cents: 900, method: 'cash' as const },
+      { fromId: 'A', toId: 'B', cents: 100, method: 'other' as const },
+    ];
+    const got = ledgerSettlePlan(split, ledger('A', { flags }), { allowEarly: true });
+    const notReceived: SettleNotReceivedMap = {
+      A: { cents: 100, method: 'other', toUserId: 'B' }, // to an earlier payer: kept, the views ignore it
+      B: { cents: 900, method: 'cash', toUserId: 'A' },
+    };
+    expect(got.plan).toStrictEqual(settlePlan(split, 'A', {}, { allowEarly: true, notReceived }));
+  });
+
+  it('a payment back from the payer lowers the mark (contract P)', () => {
+    const split = worked();
+    const payments = [wpay('B', 'A', 1500, { at: WT1, method: 'venmo' }), wpay('A', 'B', 500, { at: WT2, method: 'cash' })];
+    const got = ledgerSettlePlan(split, ledger('A', { payments }), { allowEarly: true });
+    expect(got.plan).toStrictEqual(settlePlan(split, 'A', { B: mk(1000, WT1, 'A', 'venmo') }, { allowEarly: true, notReceived: {} }));
+  });
+
+  it('without allowEarly an incomplete bill is blocked, as settlePlan', () => {
+    const split = sharesBill({ A: 2500, B: 2500 }, { unclaimed: 5000 });
+    expect(ledgerSettlePlan(split, ledger('A'))).toEqual({ plan: settlePlan(split, 'A', {}), planKey: null });
+  });
+
+  it('blocked plans have no key', () => {
+    const zero: SplitInput = { totalCents: 1000, items: [{ id: 'x', totalCents: 0 }], claims: [c('x', 'A')], participantIds: ['A', 'B'], extrasMode: PROP };
+    expect(ledgerSettlePlan(zero, ledger('A'))).toEqual({ plan: { status: 'blocked_all_zero' }, planKey: null });
+  });
+
+  it('a payer who is not a participant → blocked_bad_payer, no key', () => {
+    const split = sharesBill({ A: 2500, B: 2500 });
+    expect(ledgerSettlePlan(split, ledger('Z'))).toEqual({ plan: { status: 'blocked_bad_payer' }, planKey: null });
+    const payers = [
+      { userId: 'A', paidCents: 2500 },
+      { userId: 'Z', paidCents: 2500 },
+    ];
+    expect(ledgerSettlePlan(split, ledger('A', { payers }))).toEqual({ plan: { status: 'blocked_bad_payer' }, planKey: null });
+  });
+});
+
+describe('balanceFor (S2)', () => {
+  it('on a one-payer ready plan: the payer is owed every unmarked share and every "more"; an ower owes theirs', () => {
+    // Worked example: B's share is 1510. B marked 1000 → B owes 510 more.
+    const plan = settlePlan(worked(), 'A', { B: mk(1000, WT1) });
+    expect(known(balanceFor(plan, 'A'))).toEqual({ owesCents: 0, owedCents: 510, final: true });
+    expect(known(balanceFor(plan, 'B'))).toEqual({ owesCents: 510, owedCents: 0, final: true });
+    const over = settlePlan(worked(), 'A', { B: mk(2000, WT1) });
+    expect(known(balanceFor(over, 'A'))).toEqual({ owesCents: 490, owedCents: 0, final: true });
+    expect(known(balanceFor(over, 'B'))).toEqual({ owesCents: 0, owedCents: 490, final: true });
+    const none = settlePlan(worked(), 'A', {});
+    expect(known(balanceFor(none, 'A'))).toEqual({ owesCents: 0, owedCents: 1510, final: true });
+    expect(known(balanceFor(none, 'B'))).toEqual({ owesCents: 1510, owedCents: 0, final: true });
+  });
+
+  it('within tolerance counts as settled', () => {
+    const plan = settlePlan(worked(), 'A', { B: mk(1509, WT1) });
+    expect(known(balanceFor(plan, 'B'))).toEqual({ owesCents: 0, owedCents: 0, final: true });
+  });
+
+  it('an early plan is not final', () => {
+    const split = sharesBill({ A: 2500, B: 2500 }, { unclaimed: 5000 });
+    const plan = settlePlan(split, 'A', {}, { allowEarly: true });
+    expect(known(balanceFor(plan, 'B'))).toEqual({ owesCents: 2500, owedCents: 0, final: false });
+  });
+
+  it('unknown on a blocked plan, or for someone not in the plan', () => {
+    expect(balanceFor({ status: 'blocked', unclaimedRows: 1, unclaimedDiscountRows: 0 }, 'A')).toEqual({ known: false });
+    expect(balanceFor({ status: 'blocked_all_zero' }, 'A')).toEqual({ known: false });
+    expect(balanceFor({ status: 'blocked_bad_payer' }, 'A')).toEqual({ known: false });
+    expect(balanceFor(settlePlan(worked(), 'A', {}), 'Z')).toEqual({ known: false });
+    const r = ledgerSettlePlan(sharesBill({ A: 1, B: 1 }), ledger('A', { payments: [wpay('A', 'B', 5)] })).plan;
+    expect(balanceFor(r, 'Z')).toEqual({ known: false });
+  });
+
+  it('agrees with transfersFromReadyPlan, and Σ owes = Σ owed, on random one-payer plans', () => {
+    const next = rng(606);
+    const ids = ['A', 'B', 'C', 'D'];
+    for (let n = 0; n < 200; n++) {
+      const shares: Record<string, number> = {};
+      for (const id of ids) shares[id] = next(5) === 0 ? -(1 + next(300)) : next(5000);
+      const split = sharesBill(shares, { unclaimed: next(3) === 0 ? 1 + next(2000) : 0 });
+      if (split.totalCents < 0) continue;
+      const marks: Record<string, SettleMark | null> = {};
+      for (const id of ids.slice(1)) marks[id] = next(2) === 0 ? mk(1 + next(5000), WT1) : null;
+      const plan = settlePlan(split, 'A', marks, { allowEarly: true });
+      if (plan.status !== 'ready' && plan.status !== 'early') continue;
+      expectBalancesAddUp(plan, ids);
+      const { pairs } = transfersFromReadyPlan(plan);
+      for (const id of ids) {
+        const b = known(balanceFor(plan, id));
+        expect(b.final).toBe(plan.status === 'ready');
+        const mine = pairs.filter((p) => p.fromId === id || p.toId === id);
+        if (mine.length === 0) expect(b).toEqual({ owesCents: 0, owedCents: 0, final: b.final });
+      }
+    }
+  });
+});
+
+describe('transfersFromReadyPlan', () => {
+  it('is today\'s plan as pairs, with empty provenance', () => {
+    const plan = settlePlan(sharesBill({ A: 1000, B: 600, C: -100, D: 0 }), 'A', { B: mk(700, WT1, 'A', 'cash'), D: mk(50, WT2) });
+    if (plan.status !== 'ready') throw new Error('ready');
+    expect(transfersFromReadyPlan(plan)).toEqual({
+      pairs: [
+        { fromId: 'B', toId: 'A', targetCents: 600, paidCents: 700, remainingCents: -100, mark: { cents: 700, at: WT1, method: 'cash' }, difference: { kind: 'back', cents: 100, fromCents: 700, toCents: 600 } },
+        { fromId: 'D', toId: 'A', targetCents: 0, paidCents: 50, remainingCents: -50, mark: { cents: 50, at: WT2, method: 'other' }, difference: { kind: 'back', cents: 50, fromCents: 50, toCents: 0 } },
+      ],
+      outside: [{ fromId: 'A', toId: 'C', cents: 100 }],
+      provenance: { heldFor: {}, passedOnBy: {} },
+    });
   });
 });

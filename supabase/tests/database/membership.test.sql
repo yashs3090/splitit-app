@@ -18,6 +18,22 @@ create extension if not exists pgtap with schema extensions;
 
 select plan(41);
 
+-- Who paid 4a (20261127140001): the mark columns moved off bill_participants into
+-- public.bill_payments / bill_payment_flags. This temp view gives each participant's old columns
+-- (their pair toward the bill's current payer, contract P; the flag to that payer) so the
+-- readbacks below keep their shape. Read as the owner only (it is not granted to client roles).
+create temp view bp_marks as
+select bp.bill_id, bp.user_id, bp.added, bp.joined_at,
+       case when ps.net > 0 then ps.mark_at end as settled_at,
+       case when ps.net > 0 then ps.net::integer end as settled_cents,
+       case when ps.net > 0 then ps.method end as settled_method,
+       f.cents as not_received_cents, f.method as not_received_method, f.to_user as not_received_by
+from public.bill_participants as bp
+join public.bills as b on b.id = bp.bill_id
+cross join lateral private.pair_state(bp.bill_id, bp.user_id, b.payer_id) as ps
+left join public.bill_payment_flags as f
+  on f.bill_id = bp.bill_id and f.from_user = bp.user_id and f.to_user = b.payer_id;
+
 -- ---------------------------------------------------------------------------
 -- Helpers (run as postgres; they set the caller for the security definer functions)
 -- ---------------------------------------------------------------------------
@@ -74,7 +90,7 @@ do $$
 begin
   perform pg_temp.act('7b000000-0000-0000-0000-000000000001');
   perform public.add_participant(current_setting('test.x')::uuid, '7b000000-0000-0000-0000-000000000003');
-  perform public.set_payer(current_setting('test.x')::uuid, '7b000000-0000-0000-0000-000000000002', 0);
+  perform public.set_payer(current_setting('test.x')::uuid, '7b000000-0000-0000-0000-000000000002');
   perform pg_temp.act('7b000000-0000-0000-0000-000000000005');
   perform public.set_claim((select id from public.line_items
                             where bill_id = current_setting('test.x')::uuid and name = 'Burger'), true);
@@ -92,7 +108,7 @@ begin
   perform public.set_claim((select id from public.line_items
                             where bill_id = current_setting('test.x')::uuid and name = 'Beer' and unit_index = 0), true);
   perform pg_temp.act('7b000000-0000-0000-0000-000000000007');
-  perform public.mark_paid(current_setting('test.x')::uuid, '7b000000-0000-0000-0000-000000000002', 500);
+  perform public.mark_paid(current_setting('test.x')::uuid, '7b000000-0000-0000-0000-000000000002', 500, 'other');
 end $$;
 
 select ok(
@@ -102,7 +118,7 @@ select ok(
 
 -- Snapshot for criterion 18.
 create temp table x_parts as
-  select user_id, added, settled_at, settled_cents from public.bill_participants
+  select user_id, added, settled_at, settled_cents from pg_temp.bp_marks
   where bill_id = current_setting('test.x')::uuid;
 create temp table x_claims as
   select line_item_id, user_id, parts from public.claims where bill_id = current_setting('test.x')::uuid;
@@ -184,7 +200,7 @@ reset role;
 -- Criterion 18: refused and no-op calls changed nothing
 -- ---------------------------------------------------------------------------
 select results_eq(
-  $$ select user_id, added, settled_at, settled_cents from public.bill_participants
+  $$ select user_id, added, settled_at, settled_cents from pg_temp.bp_marks
      where bill_id = current_setting('test.x')::uuid order by user_id $$,
   $$ select * from x_parts order by user_id $$,
   'c18: every participant row and mark on X is as before');

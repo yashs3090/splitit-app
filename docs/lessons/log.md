@@ -880,3 +880,549 @@ Format:
 - Why (root cause): The user's working style for bigger slices: see the whole design before code.
 - Fix / rule: For slices of this size, offer the staged design docs (spec, UX, visual, eng) with a review page before building. Log only; the staff-engineer proposal carries the order.
 - Source: user decisions, docs/specs/2026-11-25-settle-early-and-differences.md (A1.2, Q-GLYPH)
+
+## 2026-11-26: Absence check without a positive control, eleventh time, and assertions that ran before the data landed  [area: testing]
+- What happened: Review R1 (should-fix), criterion 38 in `__tests__/homeLayout.test.tsx`: the test asserted "Your share" was absent for a bill with an `early` plan, but a row with no plan at all already shows "Total", so the check passed before the early plan had loaded. It had no positive control. R3 (nit): another assertion ran before the refresh's list had landed. Both were fixed in one pass.
+- Why (root cause): Eleventh "check that couldn't fail" in the log. The rule for this has sat in the pending `2026-11-25-absence-assertions-need-presence.md` since 2026-11-25, so no agent file has it; the reviewer caught it again by hand. This case adds a timing side the proposal doesn't name: the region was rendered, but from the data before the change, so "same render and state" wasn't enough. The thing to wait for is the new data, not the region.
+- Fix / rule: An absence check (and any assertion about async data) first waits for a positive marker that the data it depends on has landed (a value only the new plan or refreshed list produces), then asserts. Added as Change 6 to the pending absence proposal, with a note that it is the most repeated unapplied lesson in the log.
+- Source: R1 and R3 in review of docs/specs/2026-11-26-home-mobile-refresh.md; lessons 2026-11-25 "A 'no glyphs' test passed…" and "pgTAP 'settled_at unchanged' checks couldn't fail…"
+
+## 2026-11-26: Guard tests that couldn't fail on React 19, and a state tested only through another state's path  [area: testing]
+- What happened: Review R2 (nit): an "answer after unmount sets no state" test couldn't fail. React 19 no longer warns about setting state after unmount, and the focus cleanup already bumps `latest`, so the guard under test was never the thing stopping it. It was replaced by tests that hold a read open while Profile is open and answer it afterwards; these were shown to fail with the guards removed. R4 (nit): D6's "a pending read keeps the previous counts" was tested only through the failure path, so the pending state itself had no test.
+- Why (root cause): The test was written against an old React behaviour (the warning) and against one guard when two guards cover the same path. Nobody ran it once with the guard removed. Twelfth check-that-can't-fail; the second where the fix was proven by breaking the code on purpose (after the pgTAP `settled_at` fix, 2026-11-25).
+- Fix / rule: A test for a guard (stale response, after unmount, after leaving the screen) holds the request open with a deferred promise, triggers the situation, then resolves it and checks what's on screen. It's run once with the guard removed to show it fails, and the report says so. Each state the spec lists (pending, failed, done) gets its own test; one state's test doesn't stand in for another's. Added as Change 7 to the absence proposal (implementer, product-engineer, code-reviewer).
+- Source: R2 and R4 in review of docs/specs/2026-11-26-home-mobile-refresh.md; lesson 2026-11-25 "pgTAP 'settled_at unchanged' checks couldn't fail…"
+
+## 2026-11-26: CLAUDE.md's leak-check note lists one expected `cdn.jsdelivr.net` match, but the build has two files with it  [area: testing]
+- What happened: QA found `cdn.jsdelivr.net` in `dist/tesseract/worker.min.js` as well as in the lazy `webOcrEngine-*` chunk. Checked in `dist/`: one line in each file. The worker's line holds Tesseract's default core and language-data URLs, which we don't use because `lib/webOcrEngine.ts` passes self-hosted `workerPath`, `corePath` and `langPath`. CLAUDE.md names only the chunk, so each QA run has to decide whether the second match is a leak.
+- Why (root cause): The note was written before `export:web` copied the Tesseract assets into `dist/` (the `preexport:web` hook). The build changed; the note didn't.
+- Fix / rule: The expected-match note names both files and says any other match is a finding. Proposed for `CLAUDE.md` § Commands.
+- Source: QA report, docs/specs/2026-11-26-home-mobile-refresh.md
+
+## 2026-11-26: The live re-run printed the local stack's keys into the QA log  [area: testing]
+- What happened: QA's live re-run (15/15) printed the local Supabase stack's demo keys into its log. They're local-only keys, but `live-db-smoke` says "Never print a key".
+- Why (root cause): Likely the skill's own step 1 and the build-task "Environment first" step both run `npm run db:status`, which prints the URL and every key, and QA's report format asks for "the command and its relevant output". The rule says not to print keys, but the steps tell the agent to run a command that does. (Verify with QA's log which command printed them.)
+- Fix / rule: Check the stack with a command that prints names only (`npx supabase status -o env | sed 's/=.*//'`, or check its exit code), and never paste key values into a report, even local ones. Proposed for `live-db-smoke` and `qa-tester` (a rule's own steps broke it).
+- Source: QA report, docs/specs/2026-11-26-home-mobile-refresh.md; `.claude/skills/live-db-smoke/SKILL.md` step 1
+
+## 2026-11-26: Root `.env` Google variables, eighth report  [area: expo]
+- What happened: QA again reported the Google OAuth variables in the root `.env`, open as a user action since M1a and tracked in `docs/before-production.md` §3.
+- Why (root cause): A user action, still not done; the one-line-report change is still pending.
+- Fix / rule: No new rule. Added as evidence to `2026-11-24-bundle-checks-jest-setup-tracked-items.md` (Change 5).
+- Source: QA report, docs/specs/2026-11-26-home-mobile-refresh.md; seven earlier reports
+
+## 2026-11-26: Five sessions shared the repo; one Jest run at a time and builds in scratchpad copies worked  [area: process]
+- What happened: Four other Claude sessions worked in the repo during this task. Coordination by message worked: file ownership was claimed up front, only one full Jest run ran at a time across all sessions, builds ran in scratchpad copies of the repo so the shared `dist/` and `public/tesseract/` weren't touched, and the AppBanner safe-area risk was handed to the session that owns `components/AppBanner.tsx`. No collisions were reported.
+- Why (root cause): The ownership rules from 2026-11-25 held. The two new practices answer earlier lessons: Jest timeouts under load (2026-11-21, 2026-11-22, 2026-11-24 ×2) and a hook wiping a shared generated folder mid-run (2026-11-25 `public/opencv/`).
+- Fix / rule: When other sessions are active, announce a full Jest run and wait for any other one to finish, and run builds or asset-copy hooks in a scratchpad copy of the repo. A risk found in a file another session owns goes to that session. Added as Change 4 to `2026-11-25-build-task-shared-files-and-served-backend.md`.
+- Source: process notes, docs/specs/2026-11-26-home-mobile-refresh.md; lessons 2026-11-22 "Parallel Jest runs overloaded the machine…", 2026-11-25 "An npm hook wiped `public/opencv/`…"
+
+## 2026-11-26: A plain `sips` resize left the icon over the 200 KB limit  [area: expo]
+- What happened: Task 3 resized the placeholder icon with `sips`; the PNG came out over the test's 200 KB limit. Flattening the near-opaque alpha channel and recompressing brought it under.
+- Why (root cause): `sips` keeps the alpha channel and doesn't optimise PNG compression, so a resize alone doesn't shrink the file much.
+- Fix / rule: For web and PWA icons, drop an alpha channel that's (nearly) opaque and recompress after resizing, then check the size against the test. First occurrence; log only.
+- Source: Task 3, docs/specs/2026-11-26-home-mobile-refresh.md
+
+## 2026-11-26: User's choice of Home headings  [area: expo]
+- What happened: The user chose the Home section headings "Waiting on you" and "Recent". There were no corrections to the work.
+- Why (root cause): User copy decision.
+- Fix / rule: Keep these headings; they're in `lib/homeSections.ts` and the spec. Log only.
+- Source: user decision during docs/specs/2026-11-26-home-mobile-refresh.md
+
+## 2026-11-27: After Venmo opened, several endings could invite a second payment  [area: expo]
+- What happened: Four findings of one kind in Sent via Venmo. Review R1 (blocking): after Venmo had opened, a refused write or `created = false` showed the generic error copy and left the tab open. The spec (D2: "copy saying to check Venmo") asked for "check Venmo" copy, but it was never built. R4: a network error followed by a failed open left a "Sent" mark for a payment that never started. QA re-check N3: a write that landed but whose refetches failed sent the screen back to Pay. The Groups session's review found that `useBill` counted a superseded refetch as finished, which showed a false "Couldn't refresh" right after the return from Venmo. R3 and R10 found missing async-edge tests and handling: timeouts, the 30-minute timer, and sign-out mid-send.
+- Why (root cause): This is the sixth time the refetch and async-endings lesson has come up (2026-11-21, 2026-11-22, 2026-11-24 ×2, 2026-11-25). `2026-11-24-product-engineer-refetch-and-copy.md` has been pending since 2026-11-24. The 2026-11-25 async-limits rule was applied only to `implementer` and `code-reviewer`, but `product-engineer` built these screens, so it never had either rule. One new part: once money may have left through another app, "the write failed" and "the reload failed" are no longer harmless. The screen must never fall back to the state it showed before the send.
+- Fix / rule: Once an outside payment app may have opened, every ending (refused, already marked, network or timeout, the reload failed, superseded) says to check that app before paying again and never shows Pay as the next step. A write the server confirmed is never undone on screen by a failed or superseded refetch. Only the latest refetch decides "finished". A mark is never left behind for an open that failed. Promoted: Change 3 of the refetch proposal (product-engineer, code-reviewer), which also copies the applied async-endings bullet into `product-engineer`.
+- Source: R1, R3, R4, R10 in review; QA re-check N3; the Groups session's `useBill` finding; docs/specs/2026-11-26-sent-via-venmo.md D2; earlier refetch/async lessons listed above
+
+## 2026-11-27: The Not received confirm took a fresh token, which defeated the ABA guard  [area: rls]
+- What happened: Review R2: the "Not received" confirm read a fresh `p_expected_at` / `p_expected_cents` when the payer pressed confirm, instead of using the mark the payer had tapped. If the mark was cleared and made again in between, the confirm would clear the new mark, which the token was there to prevent.
+- Why (root cause): This is the second stale-token lesson (2026-11-25 "Stale-token checks: the order of checks decides the error…"). The token's job is to say "what I was looking at". Re-reading it at confirm time turns it into "whatever is there now".
+- Fix / rule: An expected-state token is captured from the data the person saw when they started the action (the row they tapped) and carried through any confirm step unchanged. A test changes the server state between the tap and the confirm and expects "this changed". Promoted: Change 4 of the refetch proposal (product-engineer, code-reviewer).
+- Source: R2 in review of docs/specs/2026-11-26-sent-via-venmo.md; lesson 2026-11-25 "Stale-token checks…"
+
+## 2026-11-27: Requirements written into the spec or UX brief, but without a numbered criterion, weren't built  [area: process]
+- What happened: Two requirements were written down but never became numbered acceptance criteria, and neither was built. The "check Venmo" copy for write errors after an open was in D2 but had no criterion (it became R1). The chooser's keyboard behavior was in the UX brief's accessibility table ("arrow keys or Tab between segments, Space/Enter selects") but not in the spec (it became QA N2). Criterion 54 checked radio semantics only through `accessibilityState`.
+- Why (root cause): Agents build and test against the numbered criteria. Prose in D sections and rows in companion docs get folded into the spec and then lost. This is the second time: 2026-11-25 R9 was a user decision with no criterion and no test. The staff-engineer checklist item 8 ("the documents agree") checks contradictions, not coverage.
+- Fix / rule: Before handoff, the PM checks that every behavior, copy line and accessibility row in the D sections, the UX brief and the visual doc maps to a numbered criterion (or is marked "user check"), and lists any that don't. The staff-engineer's item 8 adds coverage. Promoted: new `2026-11-27-every-requirement-has-a-criterion.md`.
+- Source: R1 and N2; docs/specs/2026-11-26-sent-via-venmo.md line 202 and criterion 54; docs/specs/2026-11-26-sent-via-venmo-ux.md accessibility table; lesson 2026-11-25 "Review nits on tests…"
+
+## 2026-11-27: Web accessibility was checked in Jest, but react-native-web ignores `accessibilityState`  [area: expo]
+- What happened: QA F1: the web radios had no `aria-checked`, because react-native-web doesn't map `accessibilityState` to ARIA. The Jest test passed because the test renderer reads `accessibilityState` directly. The re-check found N2: the radios lacked Space and arrow-key selection. A copy slip also showed "On a computer?" on mobile web.
+- Why (root cause): This is the second time a react-native-web behavior was assumed (after 2026-11-25 "On web, the focus ring showed on mouse clicks and taps"). The Jest renderer isn't the browser DOM, so a test there can't show what a screen reader or keyboard user gets on web. A custom radio group also needs the keyboard pattern that native radios get for free. "Web" also covers phones, which `detectMobileWeb` exists to tell apart.
+- Fix / rule: Web semantics are set through the props react-native-web turns into ARIA (`aria-checked`, `aria-disabled`, `role`), and QA checks them in the running browser's DOM, not only in Jest. A custom radio group or tab set implements the keyboard pattern (arrow keys move and select, Space selects, one tab stop). Desktop-only copy is gated on `detectMobileWeb`, not on `Platform.OS === 'web'`. Promoted: new `2026-11-27-web-accessibility-in-the-browser.md` (product-engineer, qa-tester).
+- Source: QA F1, the copy fix and re-check N2, docs/specs/2026-11-26-sent-via-venmo.md; lesson 2026-11-25 "On web, the focus ring…"
+
+## 2026-11-27: Two new panels overflowed at 200% zoom  [area: expo]
+- What happened: QA F2: the Not received confirm overflowed at 200% browser zoom. After the fix, the re-check found N1: the method chooser overflowed the same way.
+- Why (root cause): `visual-designer` says "layouts wrap instead of clipping", but nothing tells the builder or QA to check web zoom. A fixed row of segments and a confirm with side-by-side buttons don't wrap unless they're designed to.
+- Fix / rule: Each new or changed panel is checked at 200% browser zoom (or a 320 px wide viewport) and at the largest Dynamic Type size. Rows of controls wrap or stack, and nothing is clipped or scrolls sideways. This happened twice in one task, so it's promoted with the web-accessibility proposal (product-engineer, qa-tester).
+- Source: QA F2 and re-check N1, docs/specs/2026-11-26-sent-via-venmo.md
+
+## 2026-11-27: The undo rule and the method list were written out in more than one place  [area: money-math]
+- What happened: Review R6: the rule for who may undo a mark was implemented twice. R9: the payment-method subset (`venmo` / `cash`) was spelled out where it could have come from one list.
+- Why (root cause): This is the fifth "same rule in two places" (2026-11-22, 2026-11-24, 2026-11-25 ×2). The user rejected the repo-wide `CLAUDE.md` bullet on 2026-11-25 and gave no reason. The 2026-11-25 entry said to propose a narrow version next time, but only after asking the user why the bullet was rejected.
+- Fix / rule: Same lesson. Proposed narrowly as Change 3 of the pending `2026-11-25-one-status-source-per-screen.md`: `code-reviewer` flags a rule or allowed-values list decided in two places. The proposal puts the "why was it rejected" question to the user first.
+- Source: R6, R9 in review of docs/specs/2026-11-26-sent-via-venmo.md; lesson 2026-11-25 "The user rejected the 'import, never copy' CLAUDE.md convention"
+
+## 2026-11-27: Copy said "paid" for a send, and Settle was pushed twice  [area: expo]
+- What happened: Review R5: copy said someone "paid" when the app only knows they sent money through Venmo (the payer hasn't confirmed it arrived). R8: Settle was pushed onto the stack twice.
+- Why (root cause): R5: the copy described what we hope happened, not what the app knows. R8: notifications added a new source of navigation (the responder) next to the existing ones. This is the second case of more than one navigator (2026-11-19 "Only the single resume effect navigates after sign-in").
+- Fix / rule: Status copy says only what the app knows: "Sent via Venmo" until the payer confirms. Any new navigation source (notification response, deep link, resume) goes through the existing gate, or skips the navigation if the target is already on top, with a test that fires two sources. Log only. The navigation rule is already in `product-engineer`, but it should name notification responses if this happens again.
+- Source: R5, R8 in review of docs/specs/2026-11-26-sent-via-venmo.md; lesson 2026-11-19 "Only the single resume effect navigates…"
+
+## 2026-11-27: A function used in a CHECK constraint needs EXECUTE for every role that writes, including service_role  [area: rls]
+- What happened: Review R7 (accepted): a CHECK constraint calls a function whose EXECUTE was revoked from the roles that write the table, under our revoke-all convention, so `service_role` writes fail. The trade-off was accepted.
+- Why (root cause): The explicit-grants convention revokes EXECUTE by default, and a CHECK constraint runs as the writing role.
+- Fix / rule: When a CHECK constraint or trigger calls a function, grant EXECUTE to every role that writes the table, or record that the role is meant to be blocked (as here). Add a pgTAP test for it. First occurrence; log only.
+- Source: R7 in review of docs/specs/2026-11-26-sent-via-venmo.md
+
+## 2026-11-27: Unit tests passed on both sides, but `settleView` never passed `notReceived` into `settlePlan`  [area: testing]
+- What happened: The T10 live check (61/61 in the end) found that `settleView` didn't pass `notReceived` into `settlePlan`. Both functions had passing unit tests. Separately, T6 added new footer kinds, and `SettleFooter` crashed on them until 9a fixed it.
+- Why (root cause): Each function was tested alone, and nothing tested the input as it passed through the caller. A new member of a union reached a renderer that didn't handle it, and no exhaustiveness check flagged the renderer.
+- Fix / rule: When a `lib/` function gains an input, at least one test goes through its caller (the view model) with that input set. A renderer that switches on a `kind` ends with an `assertNever` default, so `tsc` lists every consumer when a kind is added. The task that adds the kind names those consumers. The live multi-user run caught the wiring gap, so keep running it. First occurrence of each; log only.
+- Source: T10 live check, T6 and 9a, docs/specs/2026-11-26-sent-via-venmo.md
+
+## 2026-11-27: Our `migration up` applied another session's draft migration  [area: process]
+- What happened: `npx supabase migration up` applied the Groups session's draft migration, because it was already in `supabase/migrations/`. The sessions then agreed to reserve a migration timestamp and keep in-progress migrations out of `supabase/migrations/` until they're ready.
+- Why (root cause): `supabase/migrations/` is shared and is read in full by `migration up` and `db reset`. A file there counts as "ready", whoever wrote it. Reserving timestamps (applied 2026-11-25) covers names, not readiness.
+- Fix / rule: Draft migrations live outside `supabase/migrations/` (in the scratchpad) until the task applies them. Before `migration up` or `db reset`, list `supabase/migrations/` and compare it with the files you expect. Report any file you didn't write before applying. Promoted: Change 5 of `2026-11-25-build-task-shared-files-and-served-backend.md`.
+- Source: process incident, docs/specs/2026-11-26-sent-via-venmo.md; lessons 2026-11-25 on reserved numbers and two sessions
+
+## 2026-11-27: Fixes in another session's files stalled: a relay isn't approval, and one fix was never applied  [area: process]
+- What happened: T7 needed a one-line change in the Groups session's `homeRowView`. The Task 9b agent was rightly blocked from editing another session's test file, because a relayed message from the main session isn't the user's approval. Four failures in `homeMarkers.test.tsx` stayed open to the end, because the owning session never applied the 2-line fix it was sent.
+- Why (root cause): The ownership rules say a finding goes to the owner, but not who follows it up or what happens if the owner doesn't act. Only the user can approve an edit across ownership, so a fix sent by message stays open until someone tracks it.
+- Fix / rule: A fix needed in another session's file is sent as an exact patch with an id. The main session tracks it as "open, waiting on <session>" and lists it in the build summary until the owner confirms. If the owner doesn't act, ask the user directly whether to apply it. Never tell an agent that a relay is approval. Promoted with the migration entry: Change 5 of `2026-11-25-build-task-shared-files-and-served-backend.md`.
+- Source: T7, Task 9b and the open `homeMarkers` failures, docs/specs/2026-11-26-sent-via-venmo.md
+
+## 2026-11-27: Machine load made single test files take over 340 s  [area: testing]
+- What happened: With several sessions running, single Jest files took over 340 s, and many runs timed out. A usage limit stopped the Task 9a agent partway through; it resumed later without losing work.
+- Why (root cause): This is the sixth report of load. The worker cap and "one full run at a time" were followed, so the load came from other sessions. One session can't fix that.
+- Fix / rule: There's no new agent rule. Keep reporting timeouts with `uptime`. The real lever is the number of concurrent sessions, which is the user's call, so the build summary says so when single files take minutes. Log only.
+- Source: process, docs/specs/2026-11-26-sent-via-venmo.md; earlier load lessons (2026-11-21, 2026-11-22, 2026-11-24 ×2, 2026-11-26)
+
+## 2026-11-27: expo-notifications always adds the push entitlement; a local plugin listed before it strips it  [area: expo]
+- What happened: A read-only native spike found that the `expo-notifications` config plugin always adds `aps-environment`, and it has no option to skip it. The free Personal Team can't sign that capability. `plugins/withoutPushEntitlement.js` deletes the key and is listed before `"expo-notifications"` in `app.json`, because mods registered earlier run later. `__tests__/appConfig.test.ts` guards the order and the result. It's still unverified on a device (spec R1). The docs-writer suggested a `CLAUDE.md` line.
+- Why (root cause): A native fact that the next person changing `app.json` plugins could easily break by reordering them.
+- Fix / rule: Keep the stripper before the package, and run a new dev build after any plugin change. Proposed for `CLAUDE.md` § Commands as `2026-11-27-claude-md-notifications-plugin-order.md`. The spike itself paid off: it's added to the staff-engineer checklist (installed config plugins: what they add to the native project).
+- Source: native spike and Task 8, docs/specs/2026-11-26-sent-via-venmo-notifications-check.md; `plugins/withoutPushEntitlement.js`; docs-writer report
+
+## 2026-11-27: Staged design before code paid off a third time  [area: process]
+- What happened: The phases were PM spec, UX brief, visual design, staff-engineer review (F1–F12 plus §11 multi-payer readiness), then Amendment A1, with a native spike alongside. The design phase caught the SecureStore key format (F1) and the check-in key that could never match after `settle_difference` (F4).
+- Why (root cause): This is the third time the whole-plan read has paid off (2026-11-24, 2026-11-25).
+- Fix / rule: No new rule. Evidence for the pending `2026-11-24-staff-engineer-review.md`, whose item 1 now names config plugins and item 8 names coverage.
+- Source: docs/specs/2026-11-26-sent-via-venmo-eng.md; A1 in docs/specs/2026-11-26-sent-via-venmo.md
+
+## 2026-11-27: User's choices from Sent via Venmo  [area: process]
+- What happened: The user asked to build without stopping for questions, and asked for a "seamless, positive and reliable" experience. Mid-design they changed Home's groups. "Recent" was removed, which supersedes the 2026-11-26 entry "User's choice of Home headings". They reversed P4: a fully paid bill goes straight to Settled, with no age-off. Groups v2 and "Who paid" (a payments ledger) were negotiated with two other sessions.
+- Why (root cause): The user's product direction. "Reliable" here means never inviting a double payment.
+- Fix / rule: Home has no "Recent" group, and a fully paid bill moves to Settled at once. Copy is calm and says what to do next (UX brief: no "failed", "error" or "!"). Log only.
+- Source: user direction during docs/specs/2026-11-26-sent-via-venmo*.md
+
+## 2026-11-27: Root `.env` Google variables, ninth report  [area: expo]
+- What happened: The Google OAuth variables in the root `.env` were reported again. They're tracked in `docs/before-production.md` §3.
+- Why (root cause): A user action, still not done. The one-line-report change is still pending.
+- Fix / rule: No new rule. Added as evidence to `2026-11-24-bundle-checks-jest-setup-tracked-items.md` (Change 5). Moving those variables to `supabase/.env` is the user's step.
+- Source: QA report, docs/specs/2026-11-26-sent-via-venmo.md; eight earlier reports
+
+## 2026-11-27: react-native-web dropped `accessibilityState` again, this time because the spec prescribed it  [area: expo]
+- What happened: Review R1: `DisclosureRow` (the Settled toggle) had no `aria-expanded` on web, because react-native-web 0.21 drops `accessibilityState`, and it drops `accessibilityHint` too. The Jest RN renderer reads those props directly, so it couldn't catch this. The fix passes `aria-expanded` and `aria-hidden`, and adds a test that renders the component through react-native-web with `react-dom/server` (`renderToStaticMarkup`) and checks the attributes. `components/SharesSummary.tsx` has the same bug, tracked in `docs/before-production.md` §7. The spec itself told the builder to use `accessibilityState={{ expanded: open }}` and `accessibilityHint` (D7, "same pattern as SharesSummary"). It was written a day after the 2026-11-27 web-accessibility lesson. The static-markup test pattern is now copied by hand into four test files across sessions (`assignChips`, `billGroup`, `groupAriaWeb`, `uiPrimitives` ×2). There are also two answers to the same problem: the groups session's `lib/ariaProps.ts` and `DisclosureRow`'s inline props.
+- Why (root cause): This is the third time a react-native-web behaviour was assumed and not checked (2026-11-25 focus ring, 2026-11-27 radios). The pending `2026-11-27-web-accessibility-in-the-browser.md` targets only `product-engineer` and `qa-tester`. The PM and designer who write the props into the spec don't have it, and neither does the reviewer. The applied `product-engineer` rule ("plus an `accessibilityHint`") also says nothing about web, where the hint is lost. That proposal predicted `DisclosureRow` would have this gap, and the next task proved it.
+- Fix / rule: Specs and designs give web state as the `aria-*` props react-native-web maps (or `ariaProps(...)` from `lib/ariaProps.ts`), never `accessibilityState` alone. Anything a hint carries that matters on web goes in the label. The Jest proof for web semantics is a react-native-web static-markup render, through one shared helper in `test-utils/`, not a copy in every file. Promoted: Changes 3–5 added to `2026-11-27-web-accessibility-in-the-browser.md` (product-manager, visual-designer, code-reviewer, and a reworded product-engineer bullet).
+- Source: R1 in review of docs/specs/2026-11-26-home-groups-v2.md (D7 line 209, Built note); lessons 2026-11-25 "On web, the focus ring…" and 2026-11-27 "Web accessibility was checked in Jest…"
+
+## 2026-11-27: After several rule changes, one cell of the exhaustive table contradicted the user's binding rule  [area: process]
+- What happened: Review R2: a host who isn't the payer and hasn't claimed anything was hidden from Home. That breaks user rule 1 ("nothing claimed yet" is Waiting on you). The cause was D3's cell "Guest: E, none, `nothing` → hidden". The user redefined the groups four times mid-spec (group by what's owed; hidden and Settled come back when money changes; marker-first reversed; multi-payer future-proofing). Each change was folded into the rules, but the derived D3 table wasn't re-derived from them, and the criteria tested the table. The fix makes the cell `!final && !claimedAny ? 'waiting' : 'hidden'`.
+- Why (root cause): The criteria tested the table, not the rules. Once a table is derived, it becomes the spec the builders follow, so a cell left over from an earlier version of the rules ships. This is the third "amendment not carried to everything that restates it" (2026-11-24 "A 'can't happen' row was false, and a fixture kept the old answer…", 2026-11-24 "Docs went stale…").
+- Fix / rule: When the user's binding rules change, the PM re-derives every table cell from the current rules, and each cell names the rule it comes from (rule 1, rule 4). A cell no rule decides is an open question. The reviewer checks the table against the rules, not only the code against the table. Promoted: Change 3 of `2026-11-27-every-requirement-has-a-criterion.md`.
+- Source: R2 in review of docs/specs/2026-11-26-home-groups-v2.md (Built note); user corrections during that spec
+
+## 2026-11-27: Kept settle facts outlived the payer they were about, fourth time for kept state  [area: expo]
+- What happened: Review R3: `keepCandidates` kept settle facts from an earlier read (and A1.S5 now keeps them on a failed refresh too). A kept plan could name a payer that a newer bill summary had changed, so a row could show the old payer's pill or group. The fix drops a kept plan whose payer differs from the new list's.
+- Why (root cause): This is the fourth time state kept from earlier was trusted after the facts it described changed (2026-11-24 dismissal keyed on the bill, 2026-11-25 "Couldn't open Venmo" line, 2026-11-25 F3 the prompt keyed on the amount). The pending rule (Change 2 of the refetch proposal) covers messages and remembered choices, not data kept across a refresh. "Keep the previous result on failure" (S5) makes this more common.
+- Fix / rule: Data kept from an earlier read (on a failed refresh, or carried while a new read loads) is checked against the deciding facts in the newest data (the payer, membership, whether the bill is final) and dropped when they differ, with a test that changes the deciding fact between reads. Added as Change 2b of `2026-11-24-product-engineer-refetch-and-copy.md`.
+- Source: R3 in review of docs/specs/2026-11-26-home-groups-v2.md; A1.S5; earlier kept-state lessons listed above
+
+## 2026-11-27: `scrollTo` ran before the layout existed, and the spec's scroll formula left out a margin  [area: expo]
+- What happened: Review R4: on open, the Settled scroll ran before the opened card had laid out, so the browser clamped `scrollTo` to the old content height. The fix moves the scroll to the opened card's `onLayout`. R6: A1.S2's formula measured `toggleY` as if it were the top of the 44 pt target, but `DISCLOSURE_ROW_MARGIN` sits on both sides, so the scroll overshot. The fix is `settledScrollTarget` with `2 × DISCLOSURE_ROW_MARGIN`.
+- Why (root cause): R4: a scroll aimed at content that's about to appear depends on that content's layout, and web clamps to what's laid out now. R6: the spec wrote layout math out by hand, and the A1.S1 negative margin changed what `toggleY` measures.
+- Fix / rule: Scroll to something new from its own `onLayout` (or after a frame), never in the same handler that makes it appear. Layout math lives in one named helper with a test that uses the real token values. A spec formula is a starting value, checked against the built layout. First occurrence of each; log only.
+- Source: R4, R6 in review of docs/specs/2026-11-26-home-groups-v2.md (Built note)
+
+## 2026-11-27: Absence check without a positive control, thirteenth time: hidden, but back in another form  [area: testing]
+- What happened: Review R5: `S2_HIDDEN` in `__tests__/homeMarkers.test.tsx` checked that bill S2's "paid" label and "Paid $14.80" were absent. If S2 came back in another form (as `S1_PLAIN`, its no-plan label), the check still passed. The fix asserts the whole list of row labels equals the expected list, so S2 can't be on screen in any form.
+- Why (root cause): Thirteenth "check that couldn't fail" in the log. The rule has been in the pending `2026-11-25-absence-assertions-need-presence.md` since 2026-11-25 and isn't in any agent file. This case adds a new side: "the thing is absent" was tested as "one form of it is absent". A row can render in several forms (with or without a plan, with a pill or without), and the check named only one.
+- Fix / rule: To prove something is hidden, assert the exact full set that is shown (every row label, in order), not the absence of one representation of it. Added as Change 8 of the absence proposal.
+- Source: R5 in review of docs/specs/2026-11-26-home-groups-v2.md; the twelve earlier entries listed in the proposal
+
+## 2026-11-27: A new function's name collided with an existing field that meant something else  [area: process]
+- What happened: Review R8: A1.M2 named a new helper `collectCents(plan, myId)` ("still to collect"), but `lib/settle.ts`'s ready plan already has a `collectCents` field meaning "every positive share, paid or not". The helper was renamed `stillToCollectCents`.
+- Why (root cause): The spec picked a name without searching for it. In money code, the same name with two meanings invites the wrong amount.
+- Fix / rule: Before a spec names a new money helper or field, grep `lib/` for the name. If it exists with another meaning, pick a name that says the difference. First occurrence; log only.
+- Source: R8 in review of docs/specs/2026-11-26-home-groups-v2.md (Built note, "Rename")
+
+## 2026-11-27: QA passed, then another session's change broke two of our tests, one of them a criterion  [area: process]
+- What happened: QA passed the full suite. Afterwards splitit-app-92 added a 2000 ms debounce to `mark_bill_seen`. That broke `__tests__/homeMarkers.test.tsx` tests 32 and 36, which expect an immediate mark. Test 36 ("Home never navigates by itself") is this slice's criterion 37, which says it "passes unchanged". The file is shared: this slice owns its Home-section assertions, and other tests in it cover 92's behaviour.
+- Why (root cause): The session that changed the behaviour didn't search for tests that assert it in files it doesn't own, and a QA pass is a snapshot. This is the third cross-session test break (2026-11-25 "Parallel agents… changed a label another task's tests assert", 2026-11-27 "Fixes in another session's files stalled").
+- Fix / rule: Before changing a shared behaviour (an RPC call's timing, a label, a type), grep every test for it (`mark_bill_seen`, the label) and run those files. A failure in another session's file goes to its owner as an exact patch, tracked under the existing rule. The main session re-runs the files other sessions touched before its summary, and reports any criterion that stopped passing after QA. Added as Change 6 of `2026-11-25-build-task-shared-files-and-served-backend.md`.
+- Source: QA follow-up, docs/specs/2026-11-26-home-groups-v2.md (criterion 37); splitit-app-92's debounce change
+
+## 2026-11-27: Four sessions coordinated well; a peer's edit request went to the user; a read-only agent couldn't save its review  [area: process]
+- What happened: Four sessions coordinated by message: file ownership, one full Jest run at a time, sequenced migrations, and the Groups slot. No collisions were reported. Another session's agent was blocked from editing our test file and asked us to make the edit. The main session asked the user instead of acting on a peer's request, which is what the 2026-11-27 relay rule says. A peer agent of the Plan type was read-only, so it couldn't write its review file, and the main session saved the text.
+- Why (root cause): The ownership and relay rules held, even though they're still only in a pending proposal. Plan agents can't write files, so a step that tells one to write a file can't be done as asked.
+- Fix / rule: Keep it up. When an agent's output must be a file, spawn a type that can write, or tell it to return the text and have the main session save it word for word. Log only. The coordination rules stay evidence for `2026-11-25-build-task-shared-files-and-served-backend.md` Change 5.
+- Source: process notes, docs/specs/2026-11-26-home-groups-v2.md
+
+## 2026-11-27: User decisions arrived relayed through other sessions  [area: process]
+- What happened: Several user decisions for this slice came through other sessions' messages instead of from the user directly.
+- Why (root cause): With four sessions, the user answers in whichever one asks. The permission-laundering rule covers approvals for edits and permissions. Product decisions passed between sessions have no written handling, and a relay can drop words or context.
+- Fix / rule: Record a relayed decision with its source ("relayed by <session>, <date>"). Treat it as binding for design, but list it in the build summary for the user to confirm. It never counts as approval for an edit, permission or config change. Added as Change 4 of `2026-11-24-delegated-decisions.md`.
+- Source: process notes, docs/specs/2026-11-26-home-groups-v2.md
+
+## 2026-11-27: Who-paid Task 2b wrote its implementation before its tests  [area: testing]
+- What happened: In the related Who-paid slice, Task 2b's implementation came before its tests, which goes against `implementer`'s "Tests first for pure logic". This was offset by expectations computed by hand (not read off the code's output) and by mutants shown to fail.
+- Why (root cause): Tests written after the code tend to assert whatever it returns. Hand-computed values and mutants bring back the independence that tests-first gives.
+- Fix / rule: If tests-first is skipped, the report says so, the expected values are worked out by hand from the spec, and each key assertion is run against a mutant to show it fails. First occurrence; log only.
+- Source: Who-paid Task 2b (related to docs/specs/2026-11-26-home-groups-v2.md)
+
+## 2026-11-27: A pre-build UX critique paid off, the fourth staged design  [area: process]
+- What happened: Before the build, the visual-designer reviewed the plan with the impeccable critique, giving M1–M3 and S1–S8. M1 replaced a one-off toggle with the shared `DisclosureRow`. The user decided M2, M3, S5 and S7. Review round 1 approved the build with should-fixes only.
+- Why (root cause): This is the fourth time a whole-plan read before code has paid off (2026-11-24, 2026-11-25, 2026-11-27 Sent via Venmo). This time the read was a UX critique, not an engineering one.
+- Fix / rule: No new rule. Evidence for the pending `2026-11-24-staff-engineer-review.md`; the UX critique fills the "after UX and visual docs" step that proposal describes.
+- Source: docs/specs/2026-11-26-home-groups-v2-ux-review.md; A1 in docs/specs/2026-11-26-home-groups-v2.md
+
+## 2026-11-27: User's choices from Home groups v2  [area: expo]
+- What happened: The user set Home's groups. Waiting on you: you owe, nothing claimed, the amount went up, not received, and "claimed, can't pay yet". Owed to you: you're the payer and someone owes you. Settled: you're the payer and everyone has paid, collapsed with a count. Hidden: a guest who has paid in full. Hidden and Settled bills come back when the money changes in either direction. Groups are decided by what's owed, and markers decide only the pill (the marker-first rule is reversed). Every "is the viewer the payer" check sits in one helper, for multi-payer later. Decided from the UX review: M2 "To collect $X" on the payer's rows; M3 the first load waits up to 1000 ms for settle data; S5 a failed refresh keeps the previous groups (except on the first read); S7 the pill copy is "Claimed · not ready to pay".
+- Why (root cause): The user's product direction.
+- Fix / rule: Keep these. They're in `lib/homeSections.ts` and the spec's "user's rules". Log only.
+- Source: user decisions and corrections, docs/specs/2026-11-26-home-groups-v2.md (rules 1–8, A1)
+
+## 2026-11-27: pgTAP went red because shared test files already called another session's unapplied migrations  [area: testing]
+- What happened: Near the end of Groups, `npm run db:test` failed in `group_bills`, `membership` and `assign_item` (test 4). It looked like a Groups failure. The cause was the Who-paid session: it had edited those shared pgTAP files to call functions from its migrations `2026112714000x`, which weren't applied locally yet. After that session applied them, db:test passed (29 files, 1943 tests).
+- Why (root cause): The "failure only outside this task" rule (2026-11-24) covers Jest and `tsc`, not pgTAP. Here the failure was inside files this task owns, so the rule didn't apply. A shared test file can depend on a migration that another session hasn't applied yet. The tell is a "function does not exist" or "column does not exist" error.
+- Fix / rule: Before blaming your own task for a db:test failure, list the unapplied migrations (`npx supabase migration list --local`, or compare `supabase/migrations/` with what `migration up` would apply). Then grep `supabase/migrations/` for the missing function or column and run `git log`/`git status` on the test file. If an unapplied file you didn't write defines it, report "waiting on <session>'s migration <name>" and don't apply it yourself (2026-11-27 "Our `migration up` applied another session's draft migration"). On the writing side, a test edit that needs a draft migration lands together with that migration, not before it. Promoted: new `2026-11-27-db-test-failures-other-sessions.md` (qa-tester, supabase-engineer) and Change 7 of `2026-11-25-build-task-shared-files-and-served-backend.md`.
+- Source: final db:test run, docs/specs/2026-11-26-groups-mvp.md; Who-paid migrations 2026112714000x; lessons 2026-11-24 "Other sessions' half-finished edits broke whole-repo test and typecheck runs", 2026-11-27 "Our `migration up` applied another session's draft migration"
+
+## 2026-11-27: The live smoke run couldn't delete its throwaway users, because group membership blocks deletion  [area: testing]
+- What happened: The Groups live smoke test (45/45, run twice) failed its cleanup. `group_members.user_id` references `profiles` `on delete restrict` (A1.9), and a member with history can't leave (C-G10). So `auth.admin.deleteUser` failed for every throwaway user who'd joined a group, and the app's own calls couldn't undo it. Cleanup needed superuser `psql`, deleting the run's rows child-first by hand.
+- Why (root cause): `live-db-smoke` cleans up with `deleteUser` alone, which assumed every user-owned row cascades. Groups added the first restrict FK to `profiles` and the first membership you can't leave.
+- Fix / rule: The smoke script owns a cleanup that works for restrict FKs. It deletes the run's own rows (by run-tag user ids only) as the database superuser, parents before auth users, so cascades handle the append-only event tables. Then it counts what's left of the run in each table (users, profiles, groups, memberships, bills), and every count must be 0. Promoted: Change 3 of `2026-11-27-live-db-smoke-groups.md`.
+- Source: Groups live smoke test, docs/specs/2026-11-26-groups-mvp.md (A1.9, C-G10, A3 "cleanup left 0")
+
+## 2026-11-27: Group members can't delete their account; the spec decided the FK but not account deletion  [area: rls]
+- What happened: The same restrict FK means a group member with history can never delete their account, because they can't leave and the profile can't be removed. It's now in `docs/before-production.md` (account deletion, GR-26). Apple requires in-app account deletion (guideline 5.1.1(v)).
+- Why (root cause): A1.9 chose `on delete restrict` to protect group balances, which is a fair choice. But account deletion isn't designed yet, so nothing checked what restrict does to it. The smoke cleanup found it first.
+- Fix / rule: When a migration adds an FK to `profiles` or `auth.users`, the spec says what account deletion does to that row (cascade, anonymise, or block, and how the user gets out of a block), or it adds an item to `docs/before-production.md` in the same task. First occurrence; log only.
+- Source: Groups live smoke cleanup; A1.9 and criterion 98 of docs/specs/2026-11-26-groups-mvp.md; `docs/before-production.md` account-deletion items
+
+## 2026-11-27: The app's real TypeScript data layer ran in node through an esbuild bundle  [area: testing]
+- What happened: T12 (115/115) and the final Groups smoke test (45/45) ran the app's own `lib/groups.ts` (and the group view-model files) against the local DB, not hand-copied queries. They bundled it with esbuild (already a dependency), with two plugins. One aliased `./supabase` to a shim whose `supabase` is a Proxy forwarding to the current user's client on `globalThis`, so the script switches user before each call. The other stubbed `react-native` and `expo-*` imports.
+- Why (root cause): `live-db-smoke` says to read column lists out of `lib/bills.ts` and retype them, because `tsx` isn't installed. Retyped queries can drift from the app. Bundling tests the app's real calls, parsers and error mapping.
+- Fix / rule: For a data layer in TypeScript, bundle it with esbuild into the scratchpad and call its exported functions. This is done by hand twice now, so it goes in the skill. Promoted: Change 2 of `2026-11-27-live-db-smoke-groups.md`.
+- Source: T12 (A3) and the final smoke run, docs/specs/2026-11-26-groups-mvp.md
+
+## 2026-11-27: A copy change nobody claimed broke another session's committed fixture  [area: process]
+- What happened: A copy change in `lib/settleView.ts` ("payment didn't go through") broke another session's committed regression fixture. None of the active sessions knew who had made it. The user confirmed it came from an earlier session of theirs.
+- Why (root cause): This is the fourth cross-session test break (2026-11-25, 2026-11-27 ×2), and the first where the change had no known owner. The pending Change 6 (grep every test for a label before changing it) would have stopped it at the source. Without an owner, nobody could send the patch to anyone, and changing the change or the fixture without asking would pick a winner.
+- Fix / rule: When a change in a shared file isn't yours and no active session claims it, don't revert it or rewrite tests to match it. Ask the user who made it and which side is right, and record the answer in the spec. Promoted: Change 7 of `2026-11-25-build-task-shared-files-and-served-backend.md`, along with the pgTAP entry above.
+- Source: process incident during docs/specs/2026-11-26-groups-mvp.md; user confirmation; lesson 2026-11-27 "QA passed, then another session's change broke two of our tests…"
+
+## 2026-11-27: The docs handoff was too narrow again, so two concept notes T19 required were skipped (fourth time)  [area: process]
+- What happened: The docs-writer was first handed a narrower scope than T19, and skipped the updates to `docs/learning/concepts/people-and-membership.md` and `row-level-security.md` that T19 required. That happened even though criterion 88 says "The docs-writer reports every T19 bullet". The gap was caught and the notes were written.
+- Why (root cause): This is the fourth docs handoff that left out spec items or source material (2026-11-24 twice, 2026-11-25). The fix has been in the pending `2026-11-24-docs-cite-symbols-not-lines.md` (Changes 3 and 4) since 2026-11-24. The log line "Promoted to `build-task` and `docs-writer`" was never applied.
+- Fix / rule: Hand the docs-writer the spec path and the docs task number, plus the full list of files that task names, and have it report every bullet. Evidence added to that proposal. It's now the main reason to approve it.
+- Source: T19 and criterion 88 of docs/specs/2026-11-26-groups-mvp.md; lessons 2026-11-24 "The docs handoff dropped items…", 2026-11-25 "The docs handoff lacked the source material, third time"
+
+## 2026-11-27: The staff-engineer review before code found 4 blocking issues, the fifth staged design to pay off  [area: process]
+- What happened: `docs/specs/2026-11-26-groups-mvp-eng.md` gave 4 blocking findings, 15 should-fixes and 9 nits before T2–T7 were written. Among them: sequencing with Sent via Venmo's migration (B1), a `leave_group` × `edit_expense` deadlock (B2), and activity kinds missing from the check constraint (B4). A1 adopted all blocking and should-fix items. The code review then approved with should-fixes only (A4), and T12's live reconciliation needed no lib or DB change.
+- Why (root cause): This is the fifth time a whole-plan read before code has paid off (2026-11-24, 2026-11-25, 2026-11-27 ×2).
+- Fix / rule: No new rule. Evidence for the pending `2026-11-24-staff-engineer-review.md`.
+- Source: docs/specs/2026-11-26-groups-mvp-eng.md; A1, A3, A4 of docs/specs/2026-11-26-groups-mvp.md
+
+## 2026-11-27: Group refetches could be superseded, and group calls had no time limit  [area: expo]
+- What happened: Review R1: an older `useGroupSnapshot` refetch could count as finished, so a screen could show "Couldn't refresh" for a write that had landed. R2: group RPCs and the snapshot refetch had no time limit, so a call that never answered left the screen waiting. The fixes: only the newest refetch counts (A4.1), and every group call gives up after `GROUP_REQUEST_TIMEOUT_MS` = 15 s and reads as `network`, with retries reusing the client id (A4.2, GR-RV-2).
+- Why (root cause): This is the seventh occurrence of the async-endings lesson. R2 is the first time a screen got the "never arrives" timeout that the pending refetch proposal's (a)/(b) choice has been waiting on since 2026-11-24.
+- Fix / rule: No new rule. Evidence added to `2026-11-24-product-engineer-refetch-and-copy.md`: GR-RV-2 is a working answer for option (a), and client-id idempotency is what makes a timeout safe to retry.
+- Source: R1, R2 in review of docs/specs/2026-11-26-groups-mvp.md (A4.1, A4.2; GR-RV-1, GR-RV-2)
+
+## 2026-11-27: User wants autocompact off with the 200k context window kept  [area: process]
+- What happened: During the task, the user corrected a settings suggestion: turn autocompact off, but keep the 200k window ("without autocompact in that case").
+- Why (root cause): The user's preference for how sessions run.
+- Fix / rule: Don't suggest turning autocompact back on, or switching window size to get around it. Long tasks keep their state in files (spec amendments, decision rows, the scratchpad) so a full context can be resumed. Agents never change these settings themselves. Log only.
+- Source: user correction during docs/specs/2026-11-26-groups-mvp.md
+
+## 2026-11-27: A not-part error outlived the facts behind it, and `useNotPart`'s scope left out the bill (fifth time for kept state)  [area: expo]
+- What happened: Review R1: an error from "I wasn't part of this" stayed on screen after the line state, or the group snapshot version, it was raised under had changed, so it described a state that no longer held. The fix clears it when either changes. The one exception is `has_claims`, whose message stays to explain why nothing happened. R6: `useNotPart`'s reset scope had the group but not `billId`, so a read for one bill could land after the screen moved to another. The fix adds `billId` to the scope, and the reset settles reads still in flight.
+- Why (root cause): This is the fifth time kept state outlived the facts it described (2026-11-24 dismissal keyed on the bill, 2026-11-25 "Couldn't open Venmo", 2026-11-25 F3, 2026-11-27 kept settle facts). Change 2 of the pending refetch proposal ("a message … about a specific thing … shown only while those [facts] match") would have covered R1 as written. It's still unapplied, so the builder didn't have it. R6 is the same bug one level down: a hook's identity key is a deciding fact too.
+- Fix / rule: An error or busy flag a hook keeps is tied to the version or state it was raised under, and clears when that changes (unless it explains why nothing happened). A hook's reset key lists every id its data belongs to (bill as well as group), and a reset makes any read still in flight a no-op. Test it by changing the version, or the id, while the error or read is pending. Added as Change 2c of `2026-11-24-product-engineer-refetch-and-copy.md`.
+- Source: R1, R6 in review of docs/specs/2026-11-27-group-claim-status.md (A2); the kept-state lessons listed above
+
+## 2026-11-27: A sort meant for one screen went into a shared helper and changed another screen  [area: expo]
+- What happened: Review R2: GCS-9 ("bills that need me first") was built inside `waitingLines`, which the group Settle screen also uses. Settle's notices were reordered, and Settle was out of scope. The fix keeps `waitingLines` in snapshot order and sorts only in the group screen's model (`needsMeFirst`).
+- Why (root cause): The decision named a screen ("the group's waiting list"), but the code put it where the list is built, not where it's shown. Nobody checked who else calls the helper.
+- Fix / rule: Ordering and other display choices for one screen go in that screen's view model. Shared helpers return data in source order. Before changing a shared helper's output, grep its callers and check each one is in scope. First occurrence; log only.
+- Source: R2 in review of docs/specs/2026-11-27-group-claim-status.md (A2, GCS-9)
+
+## 2026-11-27: An opt-out moved the row the person had just tapped, and focus went with it  [area: expo]
+- What happened: Review R4: tapping "I wasn't part of this" on the group screen re-sorted the list (a needs-me row drops below the others), so the row moved out from under the person and keyboard or screen-reader focus was lost. The fix keeps the row order after an opt-out until the next focus refetch (`keepOrder`).
+- Why (root cause): The second time a data change moved what the person was acting on (2026-11-25 SharePanel remount, which lost typed text). Both come from re-rendering a list or layout from new data without asking what the person is touching. The pending `2026-11-25-visual-changes-keep-behavior.md` covers the remount half only, and only for "visual" changes.
+- Fix / rule: When a person's own action changes the data that orders a list, the list keeps its order (and the acted-on row keeps focus) until a later refresh they didn't cause, such as focus or pull-to-refresh. Test by acting on a row and checking its position and focus right after. Added as Change 6 of `2026-11-25-visual-changes-keep-behavior.md` (product-engineer, code-reviewer).
+- Source: R4 in review of docs/specs/2026-11-27-group-claim-status.md (A2); lesson 2026-11-25 "A layout change remounted SharePanel…"
+
+## 2026-11-27: A third deadlock partner: the migration header said account deletion added "no new ordering"  [area: rls]
+- What happened: Review R5: `set_not_part` takes the bill `FOR KEY SHARE`, then the caller's participant row `FOR UPDATE`. The payer-deletion trigger on `bill_participants`, fired by account deletion's cascade, holds that participant row and then wants the bill `FOR UPDATE`. So a payer deleting their account while tapping "I wasn't part of this" on the same bill could get `40P01`. The migration header listed its locks, implicit ones included, but said the cascade added "one more row … and no new ordering". It's documented in `docs/before-production.md` under the existing payer-deletion deadlock (M3 R9), not fixed.
+- Why (root cause): The third deadlock lesson (2026-11-24 ×2). The header followed the pending lock-order rule for its own paths, but checked the account-deletion cascade only for rows it adds, not for the triggers that cascade fires. Triggers on a parent's delete are the implicit locks that are easiest to miss.
+- Fix / rule: A new function's lock list also walks every existing path that deletes or updates the rows it locks (account deletion's cascade, leave, remove), including the triggers those paths fire, and checks each against the new order. Added as Change 1b of `2026-11-24-lock-order-implicit-locks.md`.
+- Source: R5 in review of docs/specs/2026-11-27-group-claim-status.md; `supabase/migrations/20261127150000_bill_not_part.sql` header; `docs/before-production.md` (payer-deletion deadlock, `set_not_part` sub-item)
+
+## 2026-11-27: Risks the spec already named reached `docs/before-production.md` only at the docs task  [area: process]
+- What happened: Review R3: the deploy-order risk (spec R1: a web build with the new parser fails against a database without the migration) and the faint tint (R5, about 1.04:1) were in the spec's Risks but not yet in `docs/before-production.md` when review ran. T7 added them, as the spec planned.
+- Why (root cause): The spec assigned the checklist items to the docs task, which runs after review. So the reviewer couldn't see them, and if T7 had been skipped they'd have been lost (the docs handoff has dropped items four times).
+- Fix / rule: A risk the spec already names goes into `docs/before-production.md` in the task that creates it (the migration task for deploy order), not in the docs task. First occurrence; log only.
+- Source: R3 in review of docs/specs/2026-11-27-group-claim-status.md; spec Risks R1, R5, T7
+
+## 2026-11-27: The "I wasn't part of this" hint doesn't reach web, a decided departure (GCS-15)  [area: expo]
+- What happened: Criterion 29 asked for the hint ("It doesn't change anyone's share") in the label or a caption. T5 left it as an `accessibilityHint`, which react-native-web drops, and logged GCS-15 instead of adding a caption. On web, a screen-reader user isn't told the opt-out leaves money alone.
+- Why (root cause): The fourth time a react-native-web drop affected a spec (2026-11-25, 2026-11-27 ×2). This time it was known and logged, which is better, but the reassurance about money is something a web user needs.
+- Fix / rule: Covered by Change 1 (reworded) of the pending `2026-11-27-web-accessibility-in-the-browser.md` ("anything the hint says that a web user needs goes in the label"). Evidence added there. GCS-15 is the user's call.
+- Source: criterion 29 and GCS-15, docs/specs/2026-11-27-group-claim-status.md; docs/decisions-to-review.md
+
+## 2026-11-27: Five sessions shared the bill screen and its tests without clobbering  [area: process]
+- What happened: Five sessions and agents edited `app/(app)/bills/[id]/index.tsx` and its test file. The spec listed which lines this task could touch (`renderRow`, the `blocks` array and their wiring), and criterion 36 had the reviewer check that from `git diff`. Agents coordinated by message: one waited for the other, edits were exact strings made after a fresh read, and this task's bill tests moved to a new file (`__tests__/billNotPart.test.tsx`, A2). Nothing was overwritten. Separately, one agent's scripted rewrite of a file (with an added `eslint-disable` comment) was denied by the permission check, and it redid the change as exact edits.
+- Why (root cause): Line-level ownership in the spec, a reviewer check on it, and a new test file instead of a shared one made sharing one file safe. The denied rewrite is the second whole-file rewrite by an agent (2026-11-25 Prettier). Whole-file rewrites hide the real change and can overwrite other sessions' edits.
+- Fix / rule: Keep it up. When a shared file is unavoidable, the spec names the parts this task may change, and new tests go in a new file. Edit shared files with exact-string edits after a fresh read. Never use a scripted rewrite, and don't add lint-disable comments to get past a check. Evidence for `2026-11-25-build-task-shared-files-and-served-backend.md` Change 5 and for `2026-11-25-visual-changes-keep-behavior.md` Changes 2 and 5 (no codemods).
+- Source: process notes (a), (c), docs/specs/2026-11-27-group-claim-status.md (file ownership, criterion 36, A2)
+
+## 2026-11-27: The esbuild live-smoke harness was reused in minutes  [area: testing]
+- What happened: QA's live reconciliation (criterion 37) reused the esbuild bundle and Supabase proxy shim from Groups, bundling `lib/groups.ts` and `lib/groupClaimStatus.ts`. Setup took minutes. Result: 47/48. The one miss was QA's own wrong expectation, not the product, and QA checked the spec before calling it.
+- Why (root cause): The third use of the harness. It's still not in `live-db-smoke`, so each run rebuilds it from the log and the last run's scratchpad.
+- Fix / rule: No new rule. Evidence for the pending `2026-11-27-live-db-smoke-groups.md` (Change 2). When a live check fails, compare the expectation with the spec before calling it a product failure (done here).
+- Source: QA report, criterion 37, docs/specs/2026-11-27-group-claim-status.md; process note (b)
+
+## 2026-11-27: User wants one web dev server, on :8081 against the local stack  [area: process]
+- What happened: During the task, two web dev servers were running (the user's original request used `localhost:8082`), and that confused the user. They asked for one server, on :8081, against the local stack. `qa-tester` step 2 tells QA to start its own server on :8082 when :8081 isn't local and to leave the user's running, which is how a second server appears.
+- Why (root cause): The rule caused a wrong result. It was written to keep QA from touching the user's server (2026-11-24 "QA's own dev server worked…"), but it leaves the user with two apps on two ports, and they can't tell which one has the new work.
+- Fix / rule: One web dev server, on :8081, against the local stack. Agents don't start a second one. If :8081 is down or points at the hosted project, the main session restarts it on :8081 with local values passed inline and tells the user, per their choice. Promoted: new `2026-11-27-one-web-dev-server.md` (qa-tester, CLAUDE.md Commands).
+- Source: user correction (d), docs/specs/2026-11-27-group-claim-status.md; lesson 2026-11-24 "QA's own dev server worked; shell values override the root `.env`"
+
+## 2026-11-27: User's choices from group claim status  [area: expo]
+- What happened: The user asked for a state on each Home group row (claim your items, you owe, you're owed, settled up), yellow on the receipts and items waiting on them, and a "not part of this" action. Their follow-up, relayed: "maybe a slight yellow hue on that line item", which made the highlight a faint background tint (`warningSurface`), not a badge or border. GCS-1..15 were decided without asking and are open in `docs/decisions-to-review.md`. GCS-2 (bill-level only), GCS-3 (private), GCS-5 (amounts on Home, reversing GR-20) and GCS-6 ("Settled up" means me) most need a look. Criterion 33, the user's light and dark visual check of the tint, is still open.
+- Why (root cause): The user's product direction.
+- Fix / rule: Keep these. Highlights the user calls "slight" are tints from existing tokens, always paired with text. Making the tint stronger is a token change and the user's call after criterion 33. Log only.
+- Source: user request and relayed follow-up, docs/specs/2026-11-27-group-claim-status.md; GCS-1..15
+
+## 2026-11-27: The $/% switch changed typed cents on bills over $100, and the only test used a $31 bill  [area: money-math]
+- What happened: QA failed A-50(c). On the Who paid page, switching $ → % → $ rounded each row through 0.01%, so on a $10,000 bill $3,333.33 came back as $3,333.00, and Save stayed enabled for the changed amount. The one test used a $31 bill, where 0.01% is less than 1¢, so it couldn't fail. The fix keeps the typed cents across the switch and adds a property test over random bills up to $999,999.99. In review round 1, R10 found the other end: a % row that rounded to 0¢ was silently dropped instead of refused (now A-50(d), a row error).
+- Why (root cause): A conversion through a coarser unit (0.01% of the total) is exact only while the total is small. The test amounts were picked for readable arithmetic, not for where the rounding step exceeds a cent. R10 is the second "invalid money input counted as $0" (2026-11-21 "Invalid money input must never count as $0…"). The seeded property test lesson (2026-11-24) was about split math, so nobody applied it to an input form.
+- Fix / rule: Any money input or unit switch ($ ↔ %, share ↔ amount) is tested at a large amount where the coarser unit is worth more than 1¢ (at least $10,000, and the input's maximum), with a seeded round-trip property test: switching there and back with no edits returns the exact typed cents, and Save stays disabled. A row that rounds to 0¢ is refused with a message, never dropped. QA's own edge cases include one large amount. Promoted: new `2026-11-27-money-inputs-large-amounts.md` (product-engineer, implementer, qa-tester).
+- Source: QA A-50(c) and R10 (round 1) in review of docs/specs/2026-11-26-who-paid.md (A2.6); lessons 2026-11-21 "Invalid money input…", 2026-11-24 "A seeded property test found a money case…"
+
+## 2026-11-27: Settle used the target where Home used `remainingCents`, so the card asked for $2.00 instead of $5.00  [area: money-math]
+- What happened: Review R1 (blocking): when a pair's paid was ≤ 0 (spec case T13: B had sent A $3.00, then the shares reversed and A owes B a $2.00 target), `settleView` used the target for the card, the Venmo link and the cash button. Home used `remainingCents` and showed $5.00. Both read the same plan; they picked different fields. Fixed, with A-29b requiring every amount to equal `balanceFor` and the "You owe N people" heading.
+- Why (root cause): The sixth "same rule decided in two places" (2026-11-22, 2026-11-24, 2026-11-25 ×2, 2026-11-27). Here the rule was "which amount is owed on this route", and each screen chose it again from the plan's fields. The lib tests for T13 passed; nothing compared the two screens' amounts on T13.
+- Fix / rule: The amount a person is asked to pay comes from one lib function (`balanceFor` / `remainingCents`), and every surface that shows or sends it (card, payment link, cash button, Request row, Home) reads that one value. A test runs the spec's worked examples (T0–T13) through every view model and checks they agree. Evidence added to the pending `2026-11-25-one-status-source-per-screen.md` (Change 3, the reviewer check for a rule decided in two places).
+- Source: R1 (round 1) in review of docs/specs/2026-11-26-who-paid.md; A-29b in A2.6; T13 in A1.2
+
+## 2026-11-27: Undo read the mark toward the lead payer only, so undo to a co-payer did nothing  [area: expo]
+- What happened: Review R2 (blocking): `sentCheckUndo` and `useVenmoSend` looked up the participant's mark toward the lead payer. With several payers, "No, undo" on a payment to a non-lead co-payer found nothing and silently did nothing. A-43b now requires undo (inline, from the notification, and the late-send clearing) to delete exactly that pair's payment.
+- Why (root cause): The code was written when a bill had one payer, and the multi-payer change replaced the payer in the model but not every lookup that assumed "the payer". The groups v2 rule put "is the viewer the payer" in one helper, but these lookups were by pair, outside it.
+- Fix / rule: When a model goes from one of something to several (one payer → several), grep for every place that picks the single one (`payer_id`, `lead`, `[0]`, `find(` on payers) and either key it by the pair the person acted on or list why one is right. A test acts on the non-first one. First occurrence; log only.
+- Source: R2 (round 1) in review of docs/specs/2026-11-26-who-paid.md; A-43b in A2.6
+
+## 2026-11-27: Async endings, eighth time: no time limit on the page, and a timed-out write could commit late  [area: expo]
+- What happened: Round 1 R5: the Who paid page's fetch and save had no time limit (A-50(h) added 15 s). Round 2 R1: a write that timed out could still commit afterwards, because `within` stops waiting but doesn't cancel the request; the late answer was unhandled. R2: `clearLateSend` had no time limit and no message. The reviewer counted R2 as the seventh time for this lesson.
+- Why (root cause): The applied rule in `implementer` says "any await … has a time limit", but nothing says what a time limit means for a write: the request keeps going, so after a timeout the outcome is unknown, not failed. `product-engineer` still doesn't have the async-endings rule at all (Change 3a of `2026-11-24-product-engineer-refetch-and-copy.md`, pending since 2026-11-24). Clean-up calls (`clearLateSend`) were treated as fire-and-forget.
+- Fix / rule: A timed-out write is "outcome unknown": the screen says it may have saved, refetches before it allows a retry (or the retry is idempotent by client id, as GR-RV-2 did), and the late answer is caught and only triggers that refetch. Clean-up and background calls get the same time limit and a message when they fail. Tests use a fake that answers after the timeout. Promoted: new `2026-11-27-late-answers-and-one-tap.md` (implementer, product-engineer, code-reviewer).
+- Source: R5 (round 1), R1 and R2 (round 2) in review of docs/specs/2026-11-26-who-paid.md; A-50(h); earlier async lessons 2026-11-21, 2026-11-22, 2026-11-24 ×2, 2026-11-25, 2026-11-27 ×2
+
+## 2026-11-27: A double tap sent two saves and two `router.back()`s, and a push had no guard  [area: expo]
+- What happened: Round 1 R4: a double tap on the payers page's confirm sent two calls and went back twice. R8: the `router.push` that opens the page had no double-tap guard, so it could be pushed twice. A-50(g) and (j) now require one call, one back and one push.
+- Why (root cause): The third and fourth time a repeated action got through (2026-11-24 R7 no guard on Pay, 2026-11-27 "Settle was pushed twice"). The 2026-11-27 entry said to log only and name the case if it recurred; it recurred in the next task. A busy flag in React state doesn't stop a second tap in the same tick.
+- Fix / rule: Any control that writes or navigates ignores repeat taps while its action is in flight, using a ref set synchronously (not only state), with a test that taps twice in the same tick and expects one call and one navigation. Promoted with the async entry above in `2026-11-27-late-answers-and-one-tap.md`.
+- Source: R4, R8 (round 1) in review of docs/specs/2026-11-26-who-paid.md; A-50(g), (j); lessons 2026-11-24 "Waiting for the refetch…" (R7), 2026-11-27 "Copy said 'paid' for a send, and Settle was pushed twice"
+
+## 2026-11-27: Home's kept plan survived a change of co-payers, sixth time for kept state  [area: expo]
+- What happened: Round 1 R11: Home kept a settle plan from an earlier read and dropped it only when the lead payer changed. When only the co-payers changed, the stale plan stayed.
+- Why (root cause): The groups v2 fix (2026-11-27 "Kept settle facts outlived the payer…") compared the one payer, written before a bill could have several. The deciding fact is now the whole payer set and their amounts. Change 2b of the refetch proposal names "the payer", singular.
+- Fix / rule: Kept data is checked against every deciding fact, and with several payers that's the full payer list and amounts (or the payers version), not the lead. Evidence added to `2026-11-24-product-engineer-refetch-and-copy.md` with a one-word rewording of Change 2b ("the payer" → "the payers and their amounts").
+- Source: R11 (round 1) in review of docs/specs/2026-11-26-who-paid.md; the five earlier kept-state entries listed in that proposal
+
+## 2026-11-27: A user-requested page replaced the planned sheet, and its criteria didn't come with it  [area: testing]
+- What happened: Another session built the Who paid page at the user's request; A2 replaced the sheet (D7, A1.5) with it and dropped the sheet's criteria without writing new ones. Review R3 found the page had almost no router tests; R12 found no test for the stateful `ownPayerChange` module and R13 no test for the flags read. Review round 1 then wrote A-50(a)–(j), and QA's one failure (A-50(c)) was in that new list.
+- Why (root cause): The third "requirement without a criterion" (2026-11-25, 2026-11-27). This time it was an amendment: replacing a design removed its criteria, and a page built outside the plan had none to start with. Builders and QA test against criteria, so the page had nothing to be held to until review.
+- Fix / rule: An amendment that replaces a design (a sheet becomes a page) replaces its criteria in the same amendment, mapping each old criterion to a new one or marking it dropped with a reason. Work built outside the plan gets criteria before review. Added as Change 4 of `2026-11-27-every-requirement-has-a-criterion.md`.
+- Source: R3, R12, R13 (round 1) in review of docs/specs/2026-11-26-who-paid.md; A2.1, A2.6
+
+## 2026-11-27: A peer session edited this session's files for a user request without announcing it  [area: process]
+- What happened: Session 0b built the user-requested Who paid page and changed two copy strings (`undoAllText`, the Home `paid_back_due` pill) inside files this session had claimed, without telling this session first. That broke the committed regression fixture `lib/__fixtures__/settle-single-payer.json`. (This is the same copy change that the Groups retro logged as "nobody claimed"; the owner turned out to be 0b.) The user confirmed both changes afterwards, and A2 records them.
+- Why (root cause): The sixth cross-session break (2026-11-25, 2026-11-27 ×4). The ownership rules say who owns a file and how to send a fix, but not that a session acting on a direct user request must still announce before editing another session's claimed files. A user request feels like enough authority, but it doesn't tell the owner, whose tests and fixtures then break.
+- Fix / rule: Before editing a file another active session has claimed, announce it to that session (file, change, why, and whether the user asked for it) and wait for an answer, even for a user-requested change. The editing session greps the tests and fixtures that assert what it changes and lists them in the announcement. Added as Change 8 of `2026-11-25-build-task-shared-files-and-served-backend.md`.
+- Source: process incident; A2.1–A2.2 in docs/specs/2026-11-26-who-paid.md; lesson 2026-11-27 "A copy change nobody claimed broke another session's committed fixture"
+
+## 2026-11-27: An agent restored a shared file from a 20-second-old backup during a positive control  [area: process]
+- What happened: To show a test could fail, an agent broke `app/(app)/bills/[id]/index.tsx`, ran the test, then restored the file by copying back a backup taken 20 seconds earlier. Other sessions were editing that file at the time. Nothing was lost, but any edit made in those 20 seconds would have been silently overwritten.
+- Why (root cause): The third whole-file overwrite of a shared file by an agent (2026-11-25 Prettier over an untracked file, 2026-11-27 a scripted rewrite the permission check denied). Positive controls are required by `qa-tester` and the absence-assertion proposal, but nothing says how to do one safely in a shared tree. Copying a backup back restores everyone's file, not just your change.
+- Fix / rule: Never restore a shared file by copying a backup, `git checkout`, `git stash` or a scripted rewrite. Do mutation and positive-control checks in a scratchpad copy of the repo, or make the change as one exact-string edit and undo it with the reverse exact-string edit right after, then confirm the diff shows only your intended changes. Promoted: new `2026-11-27-no-whole-file-restores.md` (implementer, product-engineer, qa-tester, build-task).
+- Source: process incident during docs/specs/2026-11-26-who-paid.md; lessons 2026-11-25 "The designer ran Prettier over a whole untracked file…", 2026-11-27 "Five sessions shared the bill screen…"
+
+## 2026-11-27: The main session served the hosted backend for an hour, because the root `.env` now points at hosted  [area: process]
+- What happened: The main session restarted the web dev server on :8081 with a plain start, not noticing that the root `.env` now points at the hosted Supabase project. A separate :8082 server had the local values. When the user asked for one server, the main session killed :8082, which was the local one. The user's app talked to the hosted project for about an hour, until another session flagged it. Fixed by restarting with `EXPO_PUBLIC_SUPABASE_URL` and the publishable key passed inline from `supabase status`, then checking the URL in the served bundle.
+- Why (root cause): The third hosted-server mismatch shown to the user (2026-11-24 QA, 2026-11-25 main session, now). The check is still only in pending proposals (`2026-11-25-build-task-shared-files-and-served-backend.md` Change 1, `2026-11-27-one-web-dev-server.md`), so the main session had no rule. New parts: a plain `npm run web` is now hosted by default, and consolidating servers means choosing which to kill, which needs the same check.
+- Fix / rule: Every start or restart of the web dev server passes the local URL and key inline, and is followed by a check of the Supabase host in the served bundle before anyone uses it. Before stopping any server (for example to keep only one), check which backend each one serves and keep or recreate the local one on :8081. Added as Change 3 of `2026-11-27-one-web-dev-server.md` (with a CLAUDE.md note that the root `.env` may point at hosted).
+- Source: main-session process during docs/specs/2026-11-26-who-paid.md; lessons 2026-11-24 "Checks ran against an environment…", 2026-11-25 "The dev server shown to the user pointed at the hosted project, again", 2026-11-27 "User wants one web dev server…"
+
+## 2026-11-27: The main session's handoff restated a spec decision wrongly (shareCents vs owesCents)  [area: process]
+- What happened: The main session told the X2 agent to use `shareCents` for "Your share", which contradicts spec D10 (`owesCents`). It wasn't caught at handoff; it was logged afterwards as WP-X2-1.
+- Why (root cause): The handoff paraphrased the spec's money field from memory instead of quoting it. An agent follows the handoff over the spec when they differ. The earlier handoff lessons (docs handoff too narrow, four times) were about missing items, not wrong ones.
+- Fix / rule: A handoff names the spec section and decision ids (D10, contract O) and quotes field names and amounts from the spec, never restates them from memory. The agent is told the spec wins where they differ, and reports any difference it sees. First occurrence of a contradicting handoff; log only.
+- Source: main-session process; WP-X2-1; D10 in docs/specs/2026-11-26-who-paid.md
+
+## 2026-11-27: A deliberate copy change in a "never regenerate" fixture: targeted substitution, proved byte-identical in reverse  [area: testing]
+- What happened: The two confirmed copy changes had to go into `lib/__fixtures__/settle-single-payer.json`, which must never be regenerated. They were applied as a targeted substitution of exactly those strings, and a reverse substitution produced a file byte-identical to the pre-edit copy, proving nothing else changed. Review R14: the spec first said 112 strings; the real count was 168 in 56 cases (the a11y hints were missed).
+- Why (root cause): The method worked. The count was estimated from one kind of string instead of grepped.
+- Fix / rule: To change a frozen fixture on purpose: substitute only the named strings, prove it with a reverse substitution that is byte-identical (`cmp`) to the original, and record the grepped count per string in the spec. Log only.
+- Source: A2.2 and R14 (round 1) in review of docs/specs/2026-11-26-who-paid.md
+
+## 2026-11-27: Who-paid review smaller items: a migration without begin/commit, before-production stale, a wrong back label  [area: process]
+- What happened: Round 1 R6: migration 140002 had no explicit `begin;`/`commit;`, unlike 140000 and 140001; the CLI was checked and adds none, so a failure halfway would leave it partly applied. R7: `docs/before-production.md` was out of date at review. R9: the page's back control was labelled for one entry route; it opens from the bill screen and Settle, so it now reads "Back" (WP-R9).
+- Why (root cause): R6: no rule for migration framing, and three migrations in one task were written differently. R7: the third time the checklist lagged the work (2026-11-21, 2026-11-27 "Risks the spec already named…"), though `CLAUDE.md` says same task. R9: the label assumed one entry route.
+- Fix / rule: Every migration wraps its statements in `begin;` … `commit;` (the Supabase CLI adds no transaction). `docs/before-production.md` is updated in the task that creates the risk, and the reviewer checks it. A back label names the previous screen only if there's one way in. Log only; promote R6 to `supabase-engineer` if it recurs.
+- Source: R6, R7, R9 (round 1) in review of docs/specs/2026-11-26-who-paid.md
+
+## 2026-11-27: Cross-session coordination worked again: claims, migration announcements, one full suite at a time  [area: process]
+- What happened: Sessions claimed files up front, announced migrations before applying them, ran one full Jest suite at a time across sessions, and flagged failures they saw in each other's areas. The other session caught the hosted-backend mistake.
+- Why (root cause): The pending coordination rules (`2026-11-25-build-task-shared-files-and-served-backend.md` Changes 4–7) were followed by hand. The gaps were in the parts those rules don't cover yet: announcing before editing a claimed file, and whole-file restores.
+- Fix / rule: Keep it up. Evidence for that proposal; it's now carrying eight changes from six retros, so applying it is the main lever for cross-session problems.
+- Source: process notes, docs/specs/2026-11-26-who-paid.md
+
+## 2026-11-27: User's choices from Who paid  [area: money-math]
+- What happened: The user chose a separate Who paid page over the planned sheet (built by 0b, confirmed here), kept both of 0b's copy changes ("$X payment didn't go through"; "You are owed $X"), asked for one Venmo/Cash chooser per card, and for a person who owes two payers: "just give two venmo links for this, we should support it". Product defaults decided in review: a % row that rounds to $0.00 is refused (WP-R10), and the back control reads "Back" (WP-R9).
+- Why (root cause): The user's product direction.
+- Fix / rule: Keep these. Someone who owes several payers gets one card and one payment link per payer, each with its own method chooser. Log only.
+- Source: user decisions during docs/specs/2026-11-26-who-paid.md (A2.1, A2.2, A2.6)
+
+## 2026-11-28: The main session ran Prettier over all of settle.tsx, the second whole-file format  [area: process]
+- What happened: The main session ran `npx prettier --write` on `app/(app)/bills/[id]/settle.tsx`. The repo has no Prettier config, so Prettier used its defaults and reformatted the whole file to 80 columns. It was recovered by running Prettier again with `--print-width 140 --single-quote`, which matches the repo's usual style, but a few long lines that had been kept by hand were lost.
+- Why (root cause): The second time (2026-11-25, the visual-designer on `profile.tsx`). The rule from the first time is only in pending agent proposals (`2026-11-25-visual-changes-keep-behavior.md` Changes 4/5, `2026-11-27-no-whole-file-restores.md`), and those target agents. The main session reads `CLAUDE.md`, which says nothing about formatting. With no config, any formatter run reformats every line, not just the changed ones.
+- Fix / rule: Never run a formatter (Prettier, `eslint --fix`, codemods) over an existing file in this repo. Edit only the changed lines, in the file's style. If formatting is needed, run `npx prettier --print-width 140 --single-quote --write` on new files only. Promoted to `CLAUDE.md` § Conventions: `2026-11-28-claude-md-no-formatter.md`.
+- Source: user correction during docs/specs/2026-11-28-usernames.md; lesson 2026-11-25 "The designer ran Prettier over a whole untracked file, with no way to restore it"
+
+## 2026-11-28: The first PM brief was for the whole usernames feature; the user wanted only the groundwork  [area: process]
+- What happened: The main session briefed the product-manager for the full feature: the required username gate, an editor and pickers. The user narrowed it mid-spec: "just create the framework to allow for it to happen ... like creating username, we will implement the feature later dont deep dive into it". The brief had to be redirected, and the spec now has a scope note and a **Later** section.
+- Why (root cause): The brief read the request as the whole feature, not the smallest slice the user's words supported. "Build without blocking" covers product details inside a scope. It doesn't cover the scope itself, which is the user's call.
+- Fix / rule: When a request could mean groundwork or the whole feature, the brief takes the smallest reading and names the rest as **Later** in one line each, so the user can pull more in. A scope the user narrows is quoted word for word at the top of the spec, as was done here. First occurrence; log only.
+- Source: user correction during docs/specs/2026-11-28-usernames.md (scope note)
+
+## 2026-11-28: A handle builder's degenerate input: an all-underscore base  [area: testing]
+- What happened: Review R1: `withNumberSuffix` could return a handle under 3 characters for a base like `___`, because it trimmed trailing `_` after cutting to length. The fix trims a trailing `_` only if 3 or more characters are left, and contract S was amended. QA then found `withNumberSuffix('___', 9999)` gives `9999`. That passes V, but the base is gone. R4: it now throws on an invalid base.
+- Why (root cause): The S table and criterion 16 tested ordinary names, a 20-character base and several `n` values. They didn't test a base made only of the characters the function trims, though UN-4 and B22 make `___` a valid handle. This is the string version of the degenerate cases already logged for money (2026-11-24 ×2).
+- Fix / rule: When a function cuts or trims user input, the spec's example table includes an input made only of the characters it trims, the shortest valid input, and the longest base with the largest suffix, each with its expected output. Whether `9999` is an acceptable handle for a `___` base is open (Q2 covers all-underscore handles) and belongs to the gate's spec; the main session should log it in `docs/decisions-to-review.md`. Log only.
+- Source: R1, R4 in review and QA edge note, docs/specs/2026-11-28-usernames.md
+
+## 2026-11-28: Usernames review nits: literal combining marks in a regex, and EXECUTE left with service_role  [area: rls]
+- What happened: R2: a regex that strips combining marks had the marks as literal characters. They're invisible in an editor and in a diff, and easy to lose when a file is reformatted. They're now `\u` escapes. R3 (not changed): `service_role` probably keeps EXECUTE on `set_username`. That's harmless, because `service_role` already bypasses RLS and the function isn't used in a CHECK.
+- Why (root cause): R2 is the same family as 2026-11-25 "Text sent to another app: code points aren't characters". R3: the explicit-grants rule is written for `anon`/`authenticated`/`public`; whether `service_role` should be revoked on new functions isn't stated (2026-11-27 showed a CHECK function needs it).
+- Fix / rule: Invisible, combining or control characters in source code are written as `\u` escapes, never literally. Log only. R3 doesn't need a rule yet.
+- Source: R2, R3 in review of docs/specs/2026-11-28-usernames.md
+
+## 2026-11-28: Root `.env` Google variables, tenth report  [area: expo]
+- What happened: QA saw `npx expo-doctor` list two non-`EXPO_PUBLIC_` variable names in the root `.env` (the Google OAuth client id and secret). `CLAUDE.md` says they belong in `supabase/.env`.
+- Why (root cause): A user action, still not done. The change that makes this a one-line report is still pending.
+- Fix / rule: No new rule. Added as evidence to `2026-11-24-bundle-checks-jest-setup-tracked-items.md` (Change 5). Moving the variables is the user's step.
+- Source: QA report, docs/specs/2026-11-28-usernames.md; nine earlier reports
+
+## 2026-11-28: Shared local DB across live sessions: the coordination steps worked, and the reserved ADR stub held  [area: process]
+- What happened: Several live Claude sessions shared the local database and the test slots. Announcing before `migration up`, never running `db reset`, running Jest and pgTAP one file at a time, and asking the other sessions for the full-suite slot all worked. pgTAP passed 94/94 for usernames and 2101 across 31 files afterwards; the live smoke passed 24/24, including the two-user race. ADR 0026 was reserved as a stub on disk up front, and nothing collided. Two things differed from the written rules: the main session gave the PM a migration timestamp at spec time (build-task says timestamps are taken when the migration file is created; the spec reduced the risk by drafting the file in the scratchpad), and the full Jest suite wasn't run, only `lib/username` and `lib/profile` (134/134).
+- Why (root cause): The applied ADR-stub rule (`2026-11-25-reserve-numbers-across-sessions.md`) works across sessions. The other steps are still only in the pending `2026-11-25-build-task-shared-files-and-served-backend.md`, so they were followed by hand. The task touched only `lib/` and a migration, so the targeted Jest run covered what changed.
+- Fix / rule: Keep doing this. Follow the applied rule on timestamps: take the migration timestamp when the file moves into `supabase/migrations/`, not at spec time, so it sorts after every migration another session applied in the meantime. When a task skips the full Jest suite, QA says so and lists which files ran, as was done here. Log only; more evidence for the pending build-task proposal.
+- Source: process notes, docs/specs/2026-11-28-usernames.md
+
+## 2026-11-28: A "dry run" committed a migration to the shared local DB  [area: supabase]
+- What happened: To time a dry run of `20261128100019_username_required.sql`, an agent piped `echo '\timing on'` plus the script into psql. zsh's `echo` turned `\t` into a tab, psql rejected that first line, and the error swallowed the script's `begin;`. Everything after ran in autocommit, so the final `rollback` undid nothing. For about 2–3 minutes the shared DB had `username` NOT NULL, a new trigger, a changed `handle_new_user`, backfilled usernames and ~10,000 throwaway users. The agent reverted it in one transaction; the main session verified the revert (column nullable, 0 usernames, 0 fixtures, `handle_new_user` md5 unchanged, last migration unchanged) and told every live session.
+- Why (root cause): A dry run that depends on shell quoting has no guarantee its transaction ever opened. `echo` behaves differently across shells (zsh interprets backslash escapes).
+- Fix / rule: Dry runs go through a file: `psql -v ON_ERROR_STOP=1 -f dryrun.sql`, with `begin;` as the file's first statement and `rollback;` as its last (or against a scratch database). Never pipe SQL through `echo`. After any dry run, check `supabase_migrations.schema_migrations` and the objects it would create, so a leak is caught at once. If a shared DB was changed by mistake, revert in one transaction, verify, and tell every session the time window.
+- Source: the username-required supabase-engineer report, docs/specs/2026-11-28-usernames.md Amendment A1
+
+## 2026-11-28: A background test loop hung for over 2 hours, and the agent kept "waiting on background work"  [area: testing]
+- What happened: During tab bar and Activity, one of our agents started a Jest loop in the background. It hung on `__tests__/activity.test.tsx` for over 2 hours, and the agent kept reporting that it was waiting on background work. Another session found the stuck process by its pid. The cause was a hang, not load (next entry).
+- Why (root cause): The second background-work problem (2026-11-25 "An agent's report was lost twice while it still had background work"). Backgrounding a run removes the tool's time limit, and "wait for every background command to finish" (that entry's rule) has no upper bound, so a hang looks the same as a slow run. Load reports (2026-11-27, 340 s per file) made long waits seem normal.
+- Fix / rule: Run tests in the foreground with the Bash tool's time limit set. If the full suite won't fit in one call, run it in chunks of paths. A run that passes its limit is treated as a hang: find the file by running files one at a time (or with `--detectOpenHandles`) and report it. Never wait on a background run without a deadline. Promoted: `2026-11-28-foreground-test-runs-with-limits.md` (CLAUDE.md § Commands).
+- Source: process event (a), docs/specs/2026-11-28-tab-bar-and-activity.md; lessons 2026-11-25 "An agent's report was lost twice…", 2026-11-27 "Machine load made single test files take over 340 s"
+
+## 2026-11-28: Other sessions' changes broke our tests three times, one as a hang under Jest  [area: testing]
+- What happened: (1) Another session added `<StatusBar>` from `expo-status-bar` to `app/_layout.tsx` (Appearance setting). Under Jest it left native async work pending, so `activity.test.tsx` hung (the entry above). It was found by bisecting, and fixed with a global stand-in in `test-utils/jestSetup.ts`. (2) The theme started reading device storage, so our web-render tests needed storage mocks. (3) Snapshot parsing started requiring `money_fingerprint`. Our tests that used the shared `snapshotOf` fixture (`test-utils/groupSnapshotFixtures.ts`) kept passing; only the hand-built ones broke (next entry).
+- Why (root cause): The seventh to ninth cross-session test breaks. The session that changed the root layout, the theme or the parser didn't run the tests that mount them. A native module that hangs under Jest is worse than one that throws: there's no error, only a run that never ends. `test-utils/jestSetup.ts` stands in for modules that throw (2026-11-24 PI-C-7), but nothing says a module used in the root layout needs one.
+- Fix / rule: A native module rendered by a layout every screen mounts (`app/_layout.tsx`, `app/(app)/_layout.tsx`) gets a stand-in in `test-utils/jestSetup.ts` in the same change, whether it throws or hangs under Jest. Evidence added to `2026-11-24-bundle-checks-jest-setup-tracked-items.md` (Change 1 reworded to cover hangs) and to `2026-11-25-build-task-shared-files-and-served-backend.md` (Change 6).
+- Source: process events (b), (c), docs/specs/2026-11-28-tab-bar-and-activity.md; lesson 2026-11-24 "Native modules that throw under Jest got one global stand-in…"
+
+## 2026-11-28: Hand-built raw fixtures broke on a contract change; the shared fixture didn't  [area: testing]
+- What happened: When snapshot parsing started requiring `money_fingerprint`, the tests that wrote raw snapshot rows by hand failed. Tests built through `snapshotOf` picked up the new field from one place and kept passing.
+- Why (root cause): The second time (2026-11-25 review R6, "the tests built the 'opened' state by hand"). A raw literal copies a contract's shape into each test, so every contract change breaks each copy. A shared builder holds the shape once.
+- Fix / rule: Tests build data through the shared builders in `test-utils/` (`snapshotOf`, `feedFixtures`, `groupFixtures`, `fakes`) or the app's own functions, not raw row literals. When a task adds a new shape that tests need, it adds or extends a builder there. Promoted: `2026-11-28-tests-use-shared-fixtures.md` (implementer, product-engineer).
+- Source: process event (c), docs/specs/2026-11-28-tab-bar-and-activity.md; lesson 2026-11-25 "Review nits on tests: a hand-built state…"
+
+## 2026-11-28: The live tab bar's badge reads broke 7 suites' call-log assertions  [area: testing]
+- What happened: Review R1: the tab bar mounts on every tab screen, and its badge reads added RPC calls to the call logs that 7 router suites assert exactly. They were fixed with a `quietFeedBadges()` mock (`test-utils/tabBar.ts`).
+- Why (root cause): A component in a shared layout runs inside every router test that renders under it. The spec planned the Home-ready signal change (Task 6) but not the extra calls, so the break showed up only in review.
+- Fix / rule: When a task adds reads to a layout or a component every screen mounts, the same task ships a quiet mock in `test-utils/` and lists the tests that assert call logs (grep for the RPC names, as Change 6 of the shared-files proposal says for RPC changes). First occurrence of this kind; log only.
+- Source: R1 in review of docs/specs/2026-11-28-tab-bar-and-activity.md
+
+## 2026-11-28: Feed reads raced: a loadMore during a refresh, and badge reloads on every bill version  [area: expo]
+- What happened: Review R2: a `loadMore` that answered during a refresh appended its page onto the new list and left a gap. R4: the badges reloaded on every bill version change, so a busy bill caused a burst of reads. Now there's a 2 s debounce.
+- Why (root cause): The same family as 2026-11-27 "Group refetches could be superseded…": a later read starts and an older answer still lands. A paged list has two kinds of reads (refresh and next page), and the older one wasn't dropped. Version-triggered reloads had no rate limit.
+- Fix / rule: In a paged list, a refresh supersedes any next-page read in flight (a generation counter), and a page from an older generation is dropped. Reloads triggered by realtime or version changes are debounced. Evidence added to `2026-11-27-late-answers-and-one-tap.md`, with one sentence for paged lists.
+- Source: R2, R4 in review of docs/specs/2026-11-28-tab-bar-and-activity.md; lesson 2026-11-27 "Group refetches could be superseded…"
+
+## 2026-11-28: The seen stamp was taken after the loads, and compared across clocks  [area: expo]
+- What happened: Review R3: Activity's seen time was taken after the feed's loads finished, so an event that arrived during the load was marked seen without being shown. The device's clock was also compared with server `created_at` times, so skew could mark events seen or unseen wrongly.
+- Why (root cause): "Seen" means "seen up to what was shown", and that's fixed when the read starts, not when it ends. Device and server clocks differ.
+- Fix / rule: A seen or read watermark is taken before the read starts (or is the newest shown row's server time), never "now" after the read. Compare server times with server times. If a device time has to be compared with a server time, allow for skew. First occurrence; log only.
+- Source: R3 in review of docs/specs/2026-11-28-tab-bar-and-activity.md
+
+## 2026-11-28: Entry-route tests missed again: per-route tests for the new tabs  [area: testing]
+- What happened: Review R5: the new routes lacked per-route tests (marking seen and badge refresh on each way into Activity, Groups and the bills). This is the entry-route lesson again.
+- Why (root cause): The fifth occurrence (2026-11-19, 2026-11-24 ×3). The rule that would have caught it ("screen-open effects list their routes") is still only in the pending `2026-11-24-screen-open-effects-every-entry-route.md`. The applied wording covers "navigation and auth flows", not effects that run when a screen opens.
+- Fix / rule: No new rule. Evidence added to that proposal, which is now the most-repeated pending testing rule.
+- Source: R5 in review of docs/specs/2026-11-28-tab-bar-and-activity.md
+
+## 2026-11-28: Review nits: expense titles, and one busy group forced "9+"  [area: expo]
+- What happened: R6: expense titles in feed lines needed fixing. R7: under A1.1 ("a full page counts as at least"), one busy group's full page of events made the Activity badge show "9+" even when few unread lines involved you.
+- Why (root cause): R7 (as read from the finding's summary; the retro didn't have the full text): the "at least" rule was applied to the raw event page, before the feed rule filtered it, so a full page of events that don't count still rounded the badge up.
+- Fix / rule: An "at least N" bound counts only rows that pass the rule, and rounds up to the cap only when that count reaches the cap. Log only.
+- Source: R6, R7 in review of docs/specs/2026-11-28-tab-bar-and-activity.md; Amendment A1.1
+
+## 2026-11-28: Web keyboard failures again: chips lost focus, tabs ignored Enter/Space, the narrow bar overlapped  [area: expo]
+- What happened: QA failed three web checks. (1) The Activity filter chips lost keyboard focus, because react-native-web's `ScrollView` rebuilt its tree when the `RefreshControl` was added or removed. (2) Tab bar items had `role=link` without an `href`, so the browser ignored Enter and Space. (3) The bar overlapped below about 300 px. It's now a compact icon-only bar there (FEED-47). All fixed.
+- Why (root cause): The fifth and sixth react-native-web cases (2026-11-25, 2026-11-27 ×3) and the third narrow-width overlap. Jest renders don't show focus loss, keyboard activation or layout, and the browser-check rule is still only in the pending `2026-11-27-web-accessibility-in-the-browser.md`. QA did check in the browser and found all three, which shows that check works.
+- Fix / rule: On web, keep a focused control's tree stable: don't add or remove a wrapper prop such as `RefreshControl` on a state change; render it always and toggle `refreshing`. A web control with a link role has an `href`, or it uses the button role. Evidence and one added sentence in that proposal's Change 1.
+- Source: QA report (fail round), docs/specs/2026-11-28-tab-bar-and-activity.md; FEED-45, FEED-47
+
+## 2026-11-28: QA checked the docs criteria before the docs task had run  [area: process]
+- What happened: QA ran while Task 12 (docs and logs) hadn't started, so criteria 57–58 had nothing to check. Task 12 ran afterwards.
+- Why (root cause): The second time QA failed on writing that wasn't done yet (2026-11-25 "QA failed only on missing Results-log rows"). build-task says docs that describe status run last, but not that QA waits for every task. With 12 parallel tasks, QA started when the code tasks were done.
+- Fix / rule: QA starts only after every task in the spec has finished, docs tasks included. If the main session starts it early on purpose, it tells QA which criteria are "pending Task N" so they're reported as not run, not failed. Promoted: `2026-11-28-build-task-qa-after-all-tasks.md`.
+- Source: QA report, docs/specs/2026-11-28-tab-bar-and-activity.md (criteria 57–58); lesson 2026-11-25 "QA failed only on missing Results-log rows"
+
+## 2026-11-28: An agent ran Prettier on two untracked files, the third whole-file format  [area: process]
+- What happened: An agent ran Prettier on two untracked files by mistake. The repo has no Prettier config, so it reformatted them, and with no git history they had to be rebuilt by hand.
+- Why (root cause): The third time (2026-11-25, 2026-11-28 settle.tsx). The pending `2026-11-28-claude-md-no-formatter.md` allows Prettier on "new files", but in a shared tree "untracked" doesn't mean "created by me in this task": other sessions' new files are untracked too, and they're the files with no way back.
+- Fix / rule: Never run a formatter on a file you didn't create in this task, and treat untracked files as someone else's unless you created them. Evidence and a narrower wording added to that proposal.
+- Source: process event (e), docs/specs/2026-11-28-tab-bar-and-activity.md
+
+## 2026-11-28: A relayed message conflicted with the user's direct instruction on storage  [area: process]
+- What happened: The user first said "dont make db changes / if we need to store new values/columns dont do it", then clarified "i didnt mean a blanket no on db migration - i just didnt want two last seen fields". A message relayed from another session briefly conflicted with the user's direct instruction. The main session confirmed with the user directly, and U11 records the final rule.
+- Why (root cause): The second relay case (2026-11-27 "User decisions arrived relayed through other sessions"). The pending rule says a relayed decision can guide design. It doesn't say what to do when a relay and the user's own words disagree.
+- Fix / rule: When a relayed decision conflicts with what the user said directly, the user's direct words stand, and the main session asks the user. Evidence and one sentence added to Change 4 of `2026-11-24-delegated-decisions.md`.
+- Source: process event (d), user corrections (g); U11 in docs/specs/2026-11-28-tab-bar-and-activity.md
+
+## 2026-11-28: The design review before building changed the colours and caught a pressed-state clash, the sixth staged design  [area: process]
+- What happened: Before any code, the design review changed dispute markers from red to light orange, made every read line neutral grey, and found that the settled row's `surfaceMuted` fill is exactly `ListRow`'s pressed colour. The fix (content opacity 0.7 while pressed) went into Contract M before coding. The user later approved the visuals as built.
+- Why (root cause): A whole-plan design read before code paid off again (2026-11-24, 2026-11-25, 2026-11-27 ×3).
+- Fix / rule: Keep doing it. Evidence added to `2026-11-24-staff-engineer-review.md`.
+- Source: process event (f); U12, Contract M, FEED-20 in docs/specs/2026-11-28-tab-bar-and-activity.md
+
+## 2026-11-28: User's choices from tab bar and Activity  [area: expo]
+- What happened: The user limited colour to three cases ("only these 3 warrant colors … not too much color"): needs-you amber, money green and dispute light orange ("give it a light orange"), each only while a line is unread. Red stays for app errors. Groups-list hues are only for "claim" and "settled" (U10). The tab label is "Tabs". No per-user tracking state in the database ("i just didnt want two last seen fields"), so seen state is device-local, but migrations stay allowed when they're needed for correctness or privacy. The user approved the visuals as built: the solid teal selected chip (FEED-42), the teal badge on the selected tab, and the grey settled row (FEED-20).
+- Why (root cause): The user's product direction.
+- Fix / rule: Keep these. New UI uses colour only for these three meanings, as light tints. The storage rule is U11 as the user clarified it: no per-user tracking state in the DB; other migrations only with a stated need. Log only.
+- Source: user corrections (g), U10–U12, FEED-20, FEED-42 in docs/specs/2026-11-28-tab-bar-and-activity.md
