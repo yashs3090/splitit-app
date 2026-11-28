@@ -116,13 +116,16 @@ describe.each(['ios', 'web'] as const)('on %s', (os) => {
     screen.unmount();
     renderRouter('./app', { initialUrl: '/bill' });
     await screen.findByText(/Enter the items|Check the items/);
-    expect(back().props.accessibilityHint).toBe('Goes to Home');
+    // Tab-bar spec Task 5: a cold /bill has the tabs anchored under it, so there is somewhere to go
+    // back to (the next test shows Back lands on Tabs, '/').
+    expect(back().props.accessibilityHint).toBe('Goes back');
   });
 
-  it('opened with no history (cold link or reload): Back goes home', async () => {
+  it('opened with no history (cold link or reload): Back goes home (the Tabs tab)', async () => {
     const router = renderRouter('./app', { initialUrl: '/bill' });
     await screen.findByText(/Enter the items|Check the items/);
     fireEvent.press(back());
     await waitFor(() => expect(router.getPathname()).toBe('/'));
+    expect(await screen.findByRole('header', { name: 'SplitIt' })).toBeTruthy();
   });
 });

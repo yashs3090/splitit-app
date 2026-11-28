@@ -15,6 +15,7 @@
     "expo-image-picker": "~57.0.21",
     "expo-linking": "~57.0.14",
     "expo-mlkit-ocr": "0.2.7",
+    "expo-notifications": "~57.0.26",
     "expo-router": "~57.0.31",
     "expo-secure-store": "~57.0.4",
     "expo-sms": "~57.0.2",
@@ -52,11 +53,11 @@
     "typescript": "~6.0.3"
   },
   "scripts": {
-    "prestart": "node scripts/copy-tesseract-assets.mjs && node scripts/copy-opencv-assets.mjs && node scripts/build-cv-worker.mjs",
+    "prestart": "tsx scripts/write-well-known.ts && node scripts/copy-tesseract-assets.mjs && node scripts/copy-opencv-assets.mjs && node scripts/build-cv-worker.mjs",
     "start": "expo start",
-    "preweb": "node scripts/copy-tesseract-assets.mjs && node scripts/copy-opencv-assets.mjs && node scripts/build-cv-worker.mjs",
+    "preweb": "tsx scripts/write-well-known.ts && node scripts/copy-tesseract-assets.mjs && node scripts/copy-opencv-assets.mjs && node scripts/build-cv-worker.mjs",
     "web": "expo start --web",
-    "preexport:web": "node scripts/copy-tesseract-assets.mjs && node scripts/copy-opencv-assets.mjs && node scripts/build-cv-worker.mjs",
+    "preexport:web": "tsx scripts/write-well-known.ts && node scripts/copy-tesseract-assets.mjs && node scripts/copy-opencv-assets.mjs && node scripts/build-cv-worker.mjs",
     "export:web": "expo export -p web --clear",
     "test": "jest",
     "typecheck": "tsc --noEmit && tsc --noEmit -p scripts && tsc --noEmit -p scripts/ocr-harness",

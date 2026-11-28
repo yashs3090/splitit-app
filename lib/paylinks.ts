@@ -210,3 +210,89 @@ export async function openPaymentLink(url: string): Promise<{ ok: boolean }> {
     return { ok: false };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Web opener (docs/specs/2026-11-26-sent-via-venmo.md D2 "Web", Amendment A1 eng §1; replaces SV-9)
+// ---------------------------------------------------------------------------
+
+/** What the web send needs from an opened tab. A real `Window` fits. */
+export type OpenedTab = { closed: boolean; opener: unknown };
+
+/**
+ * Opens a payment link in a new tab, synchronously, so it runs inside the tap's user gesture
+ * (popup blockers allow only that). window.open is the first statement: nothing may be awaited
+ * before it. Not React Native's Linking, which passes 'noopener' and so always gets null back and
+ * can't tell a blocked popup from an opened one.
+ *
+ * Returns the new tab with `opener` set to null (Venmo's page can't reach back into SplitIt), or
+ * null when the popup was blocked, window.open threw, or there is no window.open (native). Never
+ * throws, and never marks anything. Callers pass only venmoPayUrl output.
+ */
+export function openPaymentLinkWeb<W extends OpenedTab = Window>(url: string): W | null {
+  let w: W | null;
+  try {
+    w = (window.open(url, '_blank') as W | null) ?? null;
+  } catch {
+    return null;
+  }
+  if (w === null) return null;
+  try {
+    w.opener = null;
+  } catch {
+    // Some browsers refuse the write on a cross-origin tab; it already has no usable opener then.
+  }
+  return w;
+}
+
+/** A tab we opened, as far as closing it goes (the real Window, or a test stand-in). */
+export type ClosableTab = { close?: () => void };
+
+/**
+ * Closes a tab this app opened (review R1: the write was refused after Venmo opened, so the
+ * pre-filled payment shouldn't stay up). A tab we opened may be closed by script. Never throws: a
+ * browser that refuses, or a tab Venmo's app already took over, leaves it as it is.
+ */
+export function closeOpenedTab(w: ClosableTab | null): void {
+  try {
+    w?.close?.();
+  } catch {
+    // Nothing to do: the copy already says to check Venmo.
+  }
+}
+
+/** The tab is still open. Reading `closed` throwing counts as closed (ask, never auto-mark). */
+export function webOpenStillOpen(w: Pick<OpenedTab, 'closed'>): boolean {
+  try {
+    return !w.closed;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * How long mobile web waits after opening before it looks at the tab (starting value, A1 §1):
+ * long enough for Venmo's universal link to take over and close it, short enough to feel instant.
+ * Verify per browser in user check U3.
+ */
+export const WEB_OPEN_CHECK_MS = 300;
+
+/**
+ * What the web send does after openPaymentLinkWeb (A1 §1, contract O):
+ * - 'blocked': nothing opened (null). No write; show the open-failed line.
+ * - 'ask': show contract O ("Did you send Hana $15.10?") on return. Always on desktop web, where a
+ *   venmo.com tab may not be able to pay; on mobile web when the tab closed during the wait.
+ * - 'record': mobile web and the tab is still open after `waitMs`: record the send with 'venmo'.
+ * `mobile` comes from detectMobileWeb (lib/appBanner.ts); this file doesn't test for phones itself.
+ * Always settles: the only wait is a timer.
+ */
+export function webOpenOutcome(
+  w: Pick<OpenedTab, 'closed'> | null,
+  mobile: boolean,
+  waitMs: number = WEB_OPEN_CHECK_MS,
+): Promise<'blocked' | 'ask' | 'record'> {
+  if (w === null) return Promise.resolve('blocked');
+  if (!mobile) return Promise.resolve('ask');
+  return new Promise((resolve) => {
+    setTimeout(() => resolve(webOpenStillOpen(w) ? 'record' : 'ask'), waitMs);
+  });
+}

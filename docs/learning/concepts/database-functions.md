@@ -35,6 +35,8 @@ grant execute on function public.join_bill(text) to authenticated;
 
 Signed-out callers (`anon`) then get `42501 permission denied`. Internal helpers that only other functions call (`private.log_event`, `private.validate_bill_rows`) get no grant at all. The definer functions that call them run as `postgres`, so they don't need one. Trigger functions don't need an `execute` grant to fire either.
 
+**A function in a CHECK constraint is the exception (2026-11-27, Sent via Venmo review R7).** Postgres checks EXECUTE on it as **the role doing the write**, and runs every CHECK on every INSERT and UPDATE, even when the statement doesn't touch the checked column. `bill_participants`' method checks call `private.is_payment_method`, which only the owner may execute. So the definer functions (running as `postgres`) write fine, but `service_role`, which still has its default table grants, gets `42501 permission denied for function is_payment_method` on any INSERT or UPDATE (DELETE runs no CHECK). We kept it that way on purpose (option (a)): no non-owner role should write that table. Test: `supabase/tests/database/participants_check_execute.test.sql`.
+
 ## Why it matters here
 Four writes can't be done safely as plain table writes from the app ([ADR 0013](../decisions/0013-writes-through-database-functions.md)):
 
@@ -94,7 +96,13 @@ These functions are SQL stored **inside the managed Supabase Postgres** and vers
 | `private.lock_bill_key_share` | definer helper | Takes the bill lock first for claim writes, and only on a bill the caller is in (see "One lock order" below). | `20261124094656_people_review_fixes.sql:91-112` |
 | `private.claims_lock_bill_first` | definer trigger function | Calls `lock_bill_key_share` before any claim insert, including a direct insert that skips `set_claim`. | `20261124094656_people_review_fixes.sql:117-135` |
 | `mark_bill_seen` | definer | Writes only the caller's own `bill_seen` row, only on a bill they're on. Same `not_allowed` for "not on it" and "no such bill". Bill lock first. Logs nothing, broadcasts nothing. | `20261124144925_bill_seen.sql`, `public.mark_bill_seen` |
-| `my_bills` | definer | No arguments: the caller's bills for Home (at most 20), with the caller's own `added`, `seen`, `claimed_any` and the bill's `complete`. Takes no locks. | `20261124144925_bill_seen.sql`, `public.my_bills` |
+| `my_bills` | definer | No arguments: the caller's bills for Home (at most 20), with the caller's own `added`, `seen`, `claimed_any` and the bill's `complete`. Takes no locks. Since 2026-11-27 also the caller's own `seen_at`. | `20261126080844_sent_via_venmo.sql`, `public.my_bills` (current; first version `20261124144925_bill_seen.sql`) |
+| `mark_not_received` | definer | Only the current payer, only on someone else's current mark, given its exact cents **and** `settled_at`. Clears the mark, stores the not-received flag, logs `not_received`. Bill lock first. | `20261126080844_sent_via_venmo.sql`, `public.mark_not_received` |
+| `private.is_payment_method` | **invoker** helper, `immutable` | The one SQL list of payment methods (`venmo`, `cash`, `other`). No client role may execute it, which matters because CHECK constraints call it (see "Grants on functions"). | `20261126080844_sent_via_venmo.sql`, `private.is_payment_method` |
+| `set_username` | definer | The only way to write `profiles.username`. Only the caller's own row. Turns constraint violations into `username_invalid` / `username_reserved` and the unique index into `23505 username_taken`. Same name again: no write. | `20261128070000_usernames.sql`, `public.set_username` |
+| `delete_group` | definer | Any member. Refuses a stale money fingerprint (`group_changed`) or a waiting receipt (`receipts_waiting`). Group row `for update` first, then its bills. Deletes child-first. | `20261128100232_group_delete.sql`, `public.delete_group` |
+
+*Note 2026-11-27:* `mark_paid`, `settle_difference`, `unmark_paid`, `set_payer` and `private.bill_participants_reset_payer` were re-created in `20261126080844_sent_via_venmo.sql`. The rows above still point at the versions they describe; see "Sent via Venmo" below for what changed.
 
 `set_claim` is invoker **on purpose**. Claiming yourself is an ordinary insert that RLS already allows, so running as the caller keeps RLS in charge. Use definer only when a write genuinely needs more than the caller's rights.
 
@@ -189,6 +197,8 @@ These three run the Settle screen ([ADR 0015](../decisions/0015-settling-one-pay
 5. Count the bill's marks. If the count isn't `p_expected_cleared`: `22023 marks_changed`, nothing changes.
 6. Clear every mark, set the new payer, log one `payer_changed { before, after, cleared }`.
 
+*Note 2026-11-27 (Who paid, [ADR 0023](../decisions/0023-several-payers.md)): `set_payer` is now `set_payer(p_bill_id, p_payer_id)`. It clears no payment, so the count token (steps 5–6) is gone. See "Who paid: the ledger functions" below.*
+
 **`mark_paid(p_bill_id, p_payer_id, p_cents)`**, for yourself. The checks run in a fixed order, because `lib/bills.ts` maps each error to its own message and a test pins the order (criterion 22):
 1. Signed in, the bill exists, and you're a participant: else `42501 not_allowed`.
 2. `p_cents` is a whole number 1–99,999,999: else `22023 invalid_amount`.
@@ -281,6 +291,188 @@ Why that matters here: every claim Sam makes takes `for key share` on **his part
 
 Tests: `supabase/tests/database/settle_early.test.sql` (E1–E20, check order, grants, the lock order checked statically), `settle_difference.test.sql` (D1–D20, broadcasts, grants, lock order, the bigint case), and the K6 block of `settle_marks.test.sql`.
 
+### Sent via Venmo: how you paid, `created`, and "Not received" (2026-11-27)
+*From spec `docs/specs/2026-11-26-sent-via-venmo.md` (D1, D4, D8) and [ADR 0024](../decisions/0024-sent-via-venmo-and-payment-methods.md). One migration: `supabase/migrations/20261126080844_sent_via_venmo.sql`; tests `supabase/tests/database/sent_via_venmo.test.sql` (M1–M18, N1–N16) and `participants_check_execute.test.sql`.*
+
+Opening Venmo from Pay now records the payment by itself, and each mark says how it was paid. Four database changes make that safe.
+
+#### 1. One list of payment methods: `private.is_payment_method(text)`
+A mark now has `settled_method`: `venmo`, `cash` or `other`. The list is written **once** in SQL:
+
+```sql
+-- private.is_payment_method(p text) returns boolean, language sql, immutable
+select p in ('venmo','cash','other');
+```
+
+Both check constraints (`bill_participants_settled_method_known`, and the method part of `bill_participants_not_received_complete`) and both writers (`mark_paid`, `settle_difference`, which raise `22023 invalid_method`) call it. Nothing else in SQL spells the list, not even a comment (SV-DB-9). The app has its own copy, `PAYMENT_METHODS` in `lib/paymentMethods.ts`, and `lib/paymentMethods.test.ts` reads the newest migration that defines this function and fails if the two lists differ. That's the CLAUDE.md rule for a rule kept in both places: same rule, tested on both sides. Adding Zelle later means `create or replace` of this function in a new migration plus one line in `lib/`; the test forces both.
+
+**Null in, null out.** `p in (...)` with a null `p` gives null, not false. A CHECK whose condition is null **passes** (only false fails). So the not-received check also says `not_received_method is not null` explicitly, or a half-filled flag could slip through (SV-DB-10).
+
+Two more checks keep the columns honest: `settled_method` is set exactly when there's a mark (`bill_participants_method_with_mark`), and the three not-received columns are all set or all null. So **every statement that clears a mark has to null `settled_method` in the same UPDATE**, or it fails with `23514`. The migration found each one by searching every migration for `settled_cents = null` and changed all of them: the payer-reset trigger, `set_payer`, `unmark_paid`, and a pay-back to $0. Existing marks were filled in as `other` before the checks were added.
+
+Because these checks call a function only the owner may execute, **no other role can INSERT or UPDATE `bill_participants` now**, not even `service_role` (review R7; "Grants on functions" above).
+
+#### 2. `mark_paid` now says whether it made the mark: `created`
+The new signature is `mark_paid(p_bill_id, p_payer_id, p_cents, p_method) returns table (settled_at timestamptz, created boolean)`. The old 3-argument version was **dropped**, not kept beside it.
+
+Why it needed a return value: marking again has always been a harmless no-op (§ "Settling" above). But now the app opens Venmo right after the mark. If a stale screen, a second phone or a double tap called `mark_paid` on someone already marked, the old function answered "ok", and the app would open Venmo for a **second payment**. Now the no-op returns `(the existing settled_at, false)`, and the app opens Venmo only when `created` is true (SV-ENG-3). If a racing Undo cleared the mark in between, it returns `(null, false)` with no error (tested with a test-only trigger, SV-DB-7).
+
+The check order is 0021's, with `22023 invalid_method` right after `invalid_amount`. A successful mark also clears any not-received flag in the same UPDATE, and the `marked_paid` event gains `method`.
+
+`settle_difference` also gained a sixth argument, `p_method`. Paying **more** keeps the method if it's the same, otherwise it becomes `other` (SV-4: never claim the whole net went one way). Paying **back** ignores `p_method` and leaves the method alone, but a bad value is still refused (SV-DB-1). Its events gain `method`, and `paid_back` also gains `payer_id`.
+
+**Dropping the old signatures has a deploy cost.** PostgREST finds functions by name **and** argument names, so an older web build calling the 3-argument `mark_paid` gets `PGRST202` (not found). `npx supabase db push` and the web deploy must go out in the same sitting (SV-2, SV-ENG-23). The migration ends with `notify pgrst, 'reload schema';` so PostgREST picks up the new signatures at once.
+
+#### 3. `mark_not_received(p_bill_id, p_user_id, p_payer_id, p_expected_cents, p_expected_at)`
+The payer's "Not received" button. Security definer, `search_path = ''`, executable by `authenticated` only. In order:
+
+1. Signed out: `42501 not_allowed`.
+2. Not a participant (a plain read, **no lock**): `42501`.
+3. Lock the bill row `for share`, check participation again.
+4. You aren't `p_payer_id`: `42501`. `p_payer_id` isn't the bill's current payer: `22023 payer_changed`. The target is null or the payer: `42501`.
+5. Cents outside 1–99,999,999, or no time: `22023 invalid_amount`.
+6. Lock the target's participant row `for no key update`. No row: `22023 mark_changed`.
+7. **Idempotent retry:** the row is already unmarked and flagged by you for these cents → success, no write, no event, no broadcast.
+8. Not marked, or the cents **or** `settled_at` differ from what you sent: `22023 mark_changed`.
+9. Clear the mark (`settled_at`, `settled_cents`, `settled_method`), copy the old cents and method into the flag, set `not_received_by` to you, log one `not_received { user_id, payer_id, cents, method }` with you as the actor.
+
+Steps 7 and 8 are the same "retry first, then token" order as `settle_difference`, after every permission check. What `p_expected_at` adds is explained in [stale-state checks](stale-state-checks.md), "Amount and time together".
+
+`not_received_by` is "the person the money was owed to". It has **no foreign key on purpose**: a foreign key would make every write lock that person's `profiles` row (the hidden `for key share` from "Locks you don't write" below) and would need a cascade rule on account deletion. Its column comment says so.
+
+The flag is cleared by the person's next `mark_paid`, and also by `set_payer` and the payer-reset trigger (SV-ENG-14). Without that, a payer change A → B → A would bring an old warning back.
+
+**Lock order** (migration header): participation read (no lock) → `for share` on the bill → `for no key update` on the target row → the Activity insert's `for key share` on the bill (held) and on the caller's `profiles` row → one broadcast (none on the retry). Bill first, the same direction as everything else.
+
+#### 4. `my_bills()` gains `seen_at`
+`my_bills()` was dropped and re-created with `seen_at` (your own `bill_seen.seen_at`, or null) appended. `seen` is now `seen_at is not null` from the same join (SV-DB-11). Home compares each mark's time with `seen_at` to find sends you haven't seen yet ([in-app notices](in-app-notices.md)). An older web build still parses the result, because `parseSummary` in `lib/bills.ts` ignores columns it doesn't know.
+
+#### Direct API callers
+From the migration header: anyone may set any known method on their **own** mark (it's self-reported, like the mark). The payer may mark anyone's **current** mark not received, given its exact cents and time. That's no stronger than `unmark_paid`, which the payer already has, and it's logged. A replayed old `mark_not_received` is refused by `p_expected_at`. Nobody sets `settled_method` or the flag on another person's row except through these functions. See [row level security](row-level-security.md), "The app is not the only client".
+
+### Who paid: the ledger functions (2026-11-27)
+*From spec `docs/specs/2026-11-26-who-paid.md` (Amendment A1.3) and [ADR 0023](../decisions/0023-several-payers.md). Three migrations, applied together: `supabase/migrations/20261127140000_bill_payments.sql` (the tables), `20261127140001_bill_payments_functions.sql` (every mark function moved onto them), `20261127140002_who_paid.sql` (several payers). Tests: `supabase/tests/database/bill_payments.test.sql`, `who_paid.test.sql`. The money ideas are in [who pays whom](who-pays-whom.md).*
+
+Marks used to be columns on `bill_participants`. Now every payment is a row in `bill_payments`, and the screens' "mark" for a pair is worked out from those rows. Five patterns here are worth knowing.
+
+#### 1. An append-only table: grants for clients, a trigger for everyone else
+Clients have no write grant on `bill_payments`, not even `service_role` ([row level security](row-level-security.md), "The payments ledger"). But our definer functions run as the owner, and grants don't limit the owner. So the "never change a payment" rule needs a second layer, a trigger:
+
+```sql
+create function private.bill_payments_no_update() returns trigger
+language plpgsql set search_path = '' as $$
+begin
+  raise exception using errcode = '42501', message = 'payments_are_immutable';
+end; $$;
+
+create trigger bill_payments_no_update
+  before update on public.bill_payments
+  for each row execute function private.bill_payments_no_update();
+```
+A row trigger fires for any role that runs the `UPDATE`, owner included. So a later migration can't "fix" an amount by mistake. Writers may only **insert** (a payment, a pay-back in the other direction) or **delete** (Undo and "Not received", which mean the money never moved). This is the same shape as the Activity log's append-only guard ([audit log](audit-log.md)).
+
+#### 2. A mark worked out in one statement: `private.pair_state(bill, u, v)`
+For two people, it takes their entries in order of (`recorded_at`, `id`), keeps a running net (u→v counts +, v→u counts −), and finds when the latest positive run started. That's the mark's time, which "Not received" uses as its token. It's one `language sql` statement with a **window sum** (a running `sum(...) over (...)` in `(recorded_at, id)` order, then `lag(...)` to see where the net crossed above 0), for the same reason `settle_state` is one statement: under Read Committed, every part reads the same snapshot. `pairState` in `lib/transfers.ts` is its twin; both are tested on table P1–P6.
+
+**Why `clock_timestamp()`.** `recorded_at` defaults to `clock_timestamp()`, not `now()`. The Postgres docs say `now()` is the start time of the *transaction*, while `clock_timestamp()` "returns the actual current time, and therefore its value changes even within a single SQL command". A pay-back and a new payment written in one call would otherwise get the same time, and their order would depend only on random ids.
+
+#### 3. Change a helper, not every caller
+`mark_paid`, `settle_difference` and `private.is_removable` all ask two questions: "who are the payers?" and "do the paid amounts still add up?". The second migration added two small helpers that answer them for a one-payer bill: `private.bill_payer_ids(bill)` (just `payer_id`) and `private.payers_valid(bill)` (always true). The third migration then **redefined only the helpers** (the `bill_payers` users in split mode; Σ paid = total). Every caller picked up the split behaviour without being re-created. Fewer re-created functions means fewer chances to lose a check copied from an older body.
+
+#### 4. Keep old calls working where you can; drop signatures only on purpose
+- `mark_paid` and `settle_difference` gained `p_plan_key text default null` as their **last** argument. PostgREST matches a call by argument names, and a parameter with a default may be left out, so an older client's call still finds the function *(ADR 0024's amendment note says old calls still work; unverified against PostgREST's docs and not part of the live check)*.
+- `set_payer` lost `p_expected_cleared`, and `unmark_paid` gained `p_payer_id`. Those were dropped and re-created, so an older build gets `PGRST202` for them. Together with the dropped mark columns, that's why the hosted push and the app deploy must go out in one sitting (`docs/before-production.md` §4).
+
+#### 5. A `BEFORE DELETE` trigger, because cascades run first
+When a payer's account is deleted, their participant row goes, and `private.bill_participants_reset_payer` puts the bill back to one person (the host). It also counts the payments lost with that person (`lost` in the `payers_changed` event). The first design used an `AFTER DELETE` trigger. The engineering review (B3) found it would count nothing:
+- the foreign keys from `bill_payments` to `bill_participants` are `on delete cascade`, and Postgres runs those cascades with its own internal triggers;
+- the Postgres docs say triggers of the same kind fire "in alphabetical order by name", and the internal ones' names sort before ours *(the internal names are from the review; the result is proven by test A-18)*;
+- so by the time an `AFTER` trigger ran, the payments were already gone.
+
+The docs also say that "`BEFORE DELETE` [triggers] always fire before the delete action, even a cascading one". So it's now a `BEFORE DELETE` row trigger that returns `old` (returning `null` would cancel the delete). It counts and deletes that person's payments itself, and keeps everyone else's.
+
+#### `set_payers(p_bill_id, p_payers jsonb)`: the check order
+Host only. The order decides which error a stale screen sees (migration header):
+1. Signed out, or not the host (the bill row locked `for update`): `42501 not_allowed`, one answer for both.
+2. The bill is in a group: `22023 in_group` (group bills keep one payer).
+3. Not a JSON array of 2–50 `{user_id, paid_cents}`, a bad uuid, or the same person twice: `22023 invalid_payers`.
+4. An amount that isn't a JSON integer 1–99,999,999 (`"6000"`, `60.5`, `6000.0`): `22023 invalid_amount`. (`6e3` is accepted as 6000: Postgres's `jsonb` stores the number, not the text you typed, and `JSON.parse` in the app reads it the same way. Spec A2.4.)
+5. Someone not on the bill: `22023 not_participant`.
+6. The amounts don't add up to the total exactly: `22023 payers_total`.
+7. The same split as now: a no-op, with no event and no broadcast.
+8. Replace the rows, set `payer_id` to the lead, delete flags to anyone no longer a payer, log one `payers_changed { before, after, moved }`. No payment is deleted.
+
+The app's `validateSplit` refuses the same payloads first, with no network call; the live check sent the same boundary cases both ways and they agreed (spec A2.5).
+
+**One broadcast per call.** `mark_not_received` deletes entries *and* writes a flag: two statements on two tables, which would be two "changed" hints. `private.broadcast_bill_ledger_change` remembers, in a transaction-local setting, the `statement_timestamp()` of the last hint for that bill, and sends at most one per client statement.
+
+**Lock order** (migration headers): every payment function takes the bill row `for share` first, then the sender's participant row `for no key update` before reading `pair_state`, so two writes on the same pair take turns. `set_payer(s)` takes the bill `for update`. Bill first, as everywhere else. The one exception is account deletion again (participant row, then bill), the R9 class above, now with more tables in it (eng review S17, `docs/before-production.md` §6).
+
+### Deleting a group: delete order and the group lock (2026-11-28)
+*From [ADR 0027](../decisions/0027-delete-group.md) and spec `docs/specs/2026-11-28-delete-group.md` (A2.1, A2.12, A3). Migration: `supabase/migrations/20261128100232_group_delete.sql` (its header lists every foreign key and the full lock walk); tests: `supabase/tests/database/delete_group.test.sql`.*
+
+`delete_group(p_group_id, p_fingerprint)` removes a group and everything in it in one transaction. Two things about it are worth learning.
+
+#### 1. RESTRICT is checked at each row, so delete child-first
+`expense_shares`, `expenses` and `group_payments` point at `group_members` with `ON DELETE RESTRICT`. The Postgres docs ("Foreign Keys") say RESTRICT "prevents deletion of a referenced row" and "does not allow the check to be deferred until later in the transaction", unlike `NO ACTION`. So if we just deleted the `groups` row and let it cascade to `group_members`, the first member row would hit a RESTRICT child that still exists, and the whole delete would fail. (pgTAP shows this: without the explicit `expense_shares` and `expenses` deletes, a loaded group won't delete.)
+
+So the function deletes in this order:
+1. `expense_shares`
+2. `expenses`
+3. `group_payments` (before the bills, because some point at them)
+4. the group's bills (their line items, claims, participants and events cascade)
+5. `group_hidden`
+6. `groups`, which cascades `group_members` (whose RESTRICT children are gone now) and `group_events`.
+
+No trigger is disabled. The append-only guards on `group_events` and `bill_events` already allow a delete once the parent row is gone, which is true inside a cascade from that parent.
+
+#### 2. The deadlock, and why the money writes now lock the group first
+`delete_group` locks the **group row** `for update`, then the group's bills, then deletes member, expense and payment rows. Before this change, `add_expense` and the other money writes did the opposite: they wrote their expense or payment rows first (which takes `for key share` on member rows through the foreign keys), and touched the group row only at the end, when they logged a `group_events` row.
+
+| Time | Ana adds an expense | Ben deletes the group |
+|---|---|---|
+| 1 | Inserts the expense: holds `for key share` on member rows | |
+| 2 | | Holds `for update` on the group row |
+| 3 | | Deletes member rows: **waits for Ana** |
+| 4 | Event insert wants `for key share` on the group row: **waits for Ben** | |
+
+That's a cycle, so Postgres aborts one with `40P01`. It's the same shape as the claims deadlock in "One lock order for every bill" below (opposite orders, one of them hidden in a foreign key).
+
+**The fix:** the five money writes (`add_expense`, `edit_expense`, `delete_expense`, `record_payment`, `undo_payment`) now take `for key share` on the group row **as their first lock**. Now both sides start at the group row and queue there:
+- **Ana first:** Ben's `for update` waits until Ana commits. His fingerprint check then sees her expense and refuses with `22023 group_changed`. Ben's screen refetches.
+- **Ben first:** Ana's lock waits until Ben commits. Then the group row is gone, and Ana gets the normal `42501 not_allowed`.
+
+Why `for key share` and not something stronger? It's the weakest lock (see the conflict table in "Locks you don't write" below). It waits only for `for update`, so two money writes never wait for each other, and it doesn't wait for the `for no key update` that `rename_group`, `leave_group` and `join_group` take. Only `delete_group` and `rotate_group_code` (both `for update`) make it wait.
+
+**Why `delete_group` uses `for update` and not `for no key update`.** Every in-flight write that points at the group (an event insert, a member insert, a money write's first lock) holds `for key share` on it. Only `for update` conflicts with that, so it waits for those writes to commit, and the fingerprint read afterwards includes them.
+
+**One cycle is still accepted.** Deleting an auth account cascades in an order that can hold a group bill and then wait for the group row. That can deadlock with `delete_group` (and already could with `leave_group`). Account deletion isn't built yet; it's in `docs/before-production.md`.
+
+**What the person sees if a clash happens anyway.** `40P01`, `40001` and `55P03` all map to `busy` in the app (`BUSY_SQLSTATES` in `lib/bills.ts`, used by `lib/groups.ts`): "That didn't go through. Please try again." Postgres rolled the whole call back, so a manual retry is safe.
+
+### `set_username`: turning a constraint name into an error code (2026-11-28)
+*From the usernames groundwork ([ADR 0026](../decisions/0026-usernames.md), spec `docs/specs/2026-11-28-usernames.md`, contract R). Migration: `supabase/migrations/20261128070000_usernames.sql`; tests: `supabase/tests/database/usernames.test.sql`.*
+
+The username rule lives in two named CHECK constraints: `profiles_username_format` (length and characters) and `profiles_username_reserved` (the reserved list). Both raise the same SQLSTATE, `23514 check_violation`. But the app needs to say different things: "That username is reserved" vs "That username isn't allowed". So `set_username` does the update inside its own `begin … exception` block and asks Postgres *which* constraint failed:
+
+```sql
+exception
+  when check_violation then
+    get stacked diagnostics v_constraint = constraint_name;
+    if v_constraint = 'profiles_username_reserved' then
+      raise exception using errcode = '22023', message = 'username_reserved';
+    end if;
+    raise exception using errcode = '22023', message = 'username_invalid';
+  when unique_violation then
+    raise exception using errcode = '23505', message = 'username_taken';
+```
+
+`get stacked diagnostics` reads details of the error being handled, including `CONSTRAINT_NAME`, as a proper field. That's reliable. The alternative, a direct column update from the app, would mean finding the constraint name inside the error **text**, which is not a stable contract. The re-raise also drops the original detail, so the client never sees the constraint name or the other person's username.
+
+Two more points:
+- **Name order matters.** The Postgres docs say multiple CHECK constraints "will be tested for each row in alphabetical order by name" (`CREATE TABLE`, since 9.5). The migration header relies on this, and pgTAP row B20 checks it. `format` sorts before `reserved`, so `me` (too short *and* reserved) reports `username_invalid`, the same answer as `validateUsername` in `lib/username.ts`. Rename a constraint and that answer could flip.
+- **"Taken" has no pre-check.** The unique index on `lower(username)` decides at save time, so two people picking `sam` at once can't both win (the live check's race: exactly one did). The app maps the codes in `setUsername` (`lib/profile.ts`).
+
 ### People you've split with: add, remove, leave (2026-11-24)
 These run the "People you've split with" list and the Add people screen ([ADR 0016](../decisions/0016-people-come-from-shared-bills.md)). Clients still have no INSERT or DELETE on `bill_participants`, so these functions (plus `create_bill` and `join_bill`) are the only way onto or off a bill.
 
@@ -297,7 +489,7 @@ These run the "People you've split with" list and the Add people screen ([ADR 00
 3. Not linked (L1), or an id that isn't a user: `22023 not_linked`, the same answer either way ([row level security](row-level-security.md#not_linked-a-privacy-story-2026-11-24)).
 4. Insert the row with `added = true` (`on conflict do nothing`, so two adds at once give one row) and log one `participant_added`.
 
-**`private.is_removable(bill, user)`: rule L3 in one place** (`20261124091042_membership.sql:43-63`). True only when the person is on the bill, isn't the host or the payer, has no claims and has no "I paid" mark. Same shape as `my_links`: invoker, no client grant, called only from the two definer functions below.
+**`private.is_removable(bill, user)`: rule L3 in one place** (`20261124091042_membership.sql:43-63`). True only when the person is on the bill, isn't the host or the payer, has no claims and has no "I paid" mark. Same shape as `my_links`: invoker, no client grant, called only from the two definer functions below. *(Note 2026-11-27, Who paid: "the payer" is now "anyone in the payer set", and "no mark" is now "every pair involving them nets to $0", so someone fully paid back may still leave. `lib/membership.ts` has the same rule, tested on table L1–L7.)*
 
 **`remove_participant(p_bill_id, p_user_id)`** (host) and **`leave_bill(p_bill_id)`** (yourself):
 1. Signed in, and allowed (the host for remove; a participant for leave), else `42501 not_allowed`.
@@ -422,7 +614,7 @@ Tests: `supabase/tests/database/bill_markers.test.sql` (criteria 1–16). Criter
 
 **Error contract.** Functions raise a fixed SQLSTATE plus a fixed message (`'not_allowed'`, `'invalid_bill'`, `'claimers_changed'`…). `lib/bills.ts:119-130` maps only those to app codes. Server text never reaches the screen.
 
-Tests (pgTAP): `supabase/tests/database/bill_functions.test.sql`, `bill_edit_realtime.test.sql`, `item_split.test.sql`, `extras_split.test.sql`, `m2_review_fixes.test.sql`, `profile_venmo.test.sql`, `settle_payer.test.sql`, `settle_marks.test.sql`, `people.test.sql`, `membership.test.sql`, `people_review_fixes.test.sql`, `bill_markers.test.sql`, `settle_early.test.sql`, `settle_difference.test.sql`. They check `prosecdef` (definer or not), `proconfig = {search_path=""}`, `anon` being refused, and each guard.
+Tests (pgTAP): `supabase/tests/database/bill_functions.test.sql`, `bill_edit_realtime.test.sql`, `item_split.test.sql`, `extras_split.test.sql`, `m2_review_fixes.test.sql`, `profile_venmo.test.sql`, `settle_payer.test.sql`, `settle_marks.test.sql`, `people.test.sql`, `membership.test.sql`, `people_review_fixes.test.sql`, `bill_markers.test.sql`, `settle_early.test.sql`, `settle_difference.test.sql`, `sent_via_venmo.test.sql`, `participants_check_execute.test.sql`, `bill_payments.test.sql`, `who_paid.test.sql`. They check `prosecdef` (definer or not), `proconfig = {search_path=""}`, `anon` being refused, and each guard.
 
 ## Pitfalls
 - **Making a function definer "to be safe".** It's the opposite: definer *removes* RLS, so every check becomes your job. Default to invoker.
@@ -433,6 +625,7 @@ Tests (pgTAP): `supabase/tests/database/bill_functions.test.sql`, `bill_edit_rea
 - **Checking, then writing, without a lock.** Between the check "you're a claimer" and the update, someone could unclaim. Lock first (`select … for update`), then check.
 - **Letting a race leak a raw error.** If a row can vanish between a read and a write (as in `set_claim`), catch the specific error and raise the function's normal one. Otherwise the app sees an unexpected code and shows a generic failure.
 - **Granting a column so a function isn't needed.** If the data is for the owner only and other people can see the row, a grant leaks it to them. Use a no-argument definer function that works on `auth.uid()`'s row, as the Venmo prompt does.
+- **Calling a no-grant helper from a CHECK constraint without meaning to lock writers out.** Every role that writes the table needs EXECUTE on it. For us that's the point (only definer functions write `bill_participants`), but on a table clients write directly, it would break their writes with `42501`.
 - **Adding a grant so a trigger can set a column.** Not needed: column privileges are checked against the statement's `SET` list, not against what a `BEFORE` trigger changes. Prove it with a test rather than granting "just in case".
 - **Taking locks in different orders in different functions.** Two transactions can then each hold what the other needs (a deadlock), and Postgres aborts one. Pick one order (for us: the bill row, then participant rows) and keep to it, including in triggers.
 - **Forgetting the locks Postgres takes for you.** A foreign-key check locks the row it points to, and a trigger that writes Activity locks the bill through `bill_events`' foreign key. Count those when you check a lock order, as review R1 did.
@@ -444,6 +637,15 @@ Tests (pgTAP): `supabase/tests/database/bill_functions.test.sql`, `bill_edit_rea
 - **Summing money columns into `integer`.** Hundreds of rows can pass int4's limit. Keep sums as `bigint` and never cast them back.
 - **Taking `for update` on a row that other writes point at.** Every foreign-key insert takes `for key share` on the row it points to, and `for update` blocks that. If you're only changing non-key columns, `for no key update` is enough and doesn't make those inserts wait.
 - **An "already done" shortcut placed before the permission checks.** It would let anyone get a success answer for a call they aren't allowed to make. `settle_difference` runs its idempotent check only after every "who are you, may you" check.
+- **A no-op that answers "ok" when the caller acts on the answer.** `mark_paid`'s old silent no-op was fine while nothing followed it. Once the app opened Venmo after it, "ok" for "already marked" could start a second payment. If a caller does something irreversible after your function returns, tell it whether your function actually did the work (`created`).
+- **A CHECK built on a function that can return null.** A CHECK passes when its condition is null. Add an explicit `is not null` where the column must be set.
+- **Dropping a function signature while old clients still call it.** PostgREST answers `PGRST202` to the old call. Ship the database change and the client that uses the new signature together, or keep a wrapper.
+- **Trusting grants to keep rows unchanged.** Definer functions run as the owner, and grants don't stop the owner. If a table must be append-only, add a `before update` trigger that raises, as `bill_payments` does.
+- **An `AFTER DELETE` trigger that needs rows a cascade removes.** Foreign-key cascades run before your `AFTER` trigger, so the rows are already gone. Use `BEFORE DELETE` and return `old`.
+- **Timing several rows in one call with `now()`.** They all get the transaction's start time. Use `clock_timestamp()` when the order inside one call matters, and break ties by id.
+- **Re-creating every caller when only a shared rule changes.** Put the rule in one helper (`private.bill_payer_ids`, `private.payers_valid`) and redefine the helper.
+- **Deleting a parent and hoping the cascade sorts out RESTRICT children.** RESTRICT is checked at each row, not at commit. Delete the RESTRICT children yourself first, as `delete_group` does.
+- **A writer that reaches the shared parent row last.** If one function locks the group and then deletes its rows, every writer of those rows must lock the group first too, or the two can deadlock. `for key share` is enough for the writers.
 - **Editing an applied migration to change a function.** Write a new migration with `create or replace` (as `20261121080352_bill_events.sql` does). If the argument list changes, `drop` and re-create, then re-grant.
 
 ## Check yourself
@@ -471,6 +673,16 @@ Tests (pgTAP): `supabase/tests/database/bill_functions.test.sql`, `bill_edit_rea
 22. Why does `settle_difference` lock Sam's participant row `for no key update` and not `for update`? What would Sam notice if it used `for update`?
 23. `mark_paid` never writes `for no key update`, yet it holds that lock on the caller's row. Where does it come from?
 24. Hana (the payer) calls `settle_difference` to raise Sam's mark from 1510 to 1620. What happens, at which step, and why does the host get the same answer?
+25. Sam's phone shows an old Settle screen and he taps Pay, but he's already marked. What does `mark_paid` return, and what would have gone wrong before it returned `created`?
+26. The payment-method list lives in `private.is_payment_method`. Name every place in SQL that uses it, and the test that keeps the app's copy in step. Why can't `service_role` update `bill_participants` any more?
+27. Hana taps "Not received" on Sam's $15.10. Walk through `mark_not_received`'s steps. Why does `not_received_by` have no foreign key?
+28. `mark_paid` is security definer and owned by `postgres`. What stops it, or a later edit of it, from changing an existing payment's amount?
+29. A co-payer's account is deleted. Why would an `AFTER DELETE` trigger count 0 lost payments, and what does the `BEFORE DELETE` version do instead?
+30. `mark_paid`, `settle_difference` and `is_removable` behave differently on split bills, but the third migration didn't re-create them. How?
+31. A pay-back and a new payment are recorded in the same transaction. Why would `now()` make their order unreliable, and what does `pair_state` use to order them?
+32. Both username constraints fail with `23514`. How does `set_username` tell "reserved" from "invalid", and why is that safer than the app reading the error message of a direct update?
+33. `delete_group` deletes `expense_shares` and `expenses` before the `groups` row, even though `groups` cascades to `group_members`. What would fail if it only deleted `groups`, and why doesn't Postgres wait until commit to check?
+34. Ana's `add_expense` and Ben's `delete_group` start at the same moment. Before the fix, how could they deadlock? After it, what are the two possible outcomes, and what does each person see?
 
 ## Learn more
 - PostgreSQL, `CREATE FUNCTION`, "Writing SECURITY DEFINER Functions Safely": https://www.postgresql.org/docs/current/sql-createfunction.html
@@ -483,5 +695,12 @@ Tests (pgTAP): `supabase/tests/database/bill_functions.test.sql`, `bill_edit_rea
 - PostgreSQL, `SELECT` (the locking clauses need the `UPDATE` privilege; "SELECT List" says output expressions are evaluated after `ORDER BY` and `LIMIT`): https://www.postgresql.org/docs/current/sql-select.html
 - PostgreSQL, `INSERT ... ON CONFLICT DO UPDATE` (the upsert `mark_bill_seen` uses): https://www.postgresql.org/docs/current/sql-insert.html
 - PostgreSQL, error codes (`40P01 deadlock_detected`, `23503`, `42501`): https://www.postgresql.org/docs/current/errcodes-appendix.html
+- PostgreSQL, constraints (a CHECK "is satisfied if the check expression evaluates to true or the null value"; RESTRICT vs NO ACTION on foreign keys): https://www.postgresql.org/docs/current/ddl-constraints.html
+- PostgREST, error codes (`PGRST202`, function not found): https://docs.postgrest.org/en/stable/references/errors.html
+- PostgreSQL, `CREATE TRIGGER` (triggers of one kind fire "in alphabetical order by name"; "`BEFORE DELETE` [triggers] always fire before the delete action, even a cascading one"): https://www.postgresql.org/docs/current/sql-createtrigger.html
+- PostgreSQL, current date/time (`clock_timestamp()` vs `now()`): https://www.postgresql.org/docs/current/functions-datetime.html#FUNCTIONS-DATETIME-CURRENT
+- PostgreSQL, window functions: https://www.postgresql.org/docs/current/tutorial-window.html
+- PostgreSQL, PL/pgSQL `GET STACKED DIAGNOSTICS` (`CONSTRAINT_NAME` of the error being handled): https://www.postgresql.org/docs/current/plpgsql-control-structures.html#PLPGSQL-EXCEPTION-DIAGNOSTICS
+- PostgreSQL, `CREATE TABLE` (CHECK constraints are tested "in alphabetical order by name"): https://www.postgresql.org/docs/current/sql-createtable.html
 - Supabase, database functions: https://supabase.com/docs/guides/database/functions
 - Supabase, calling functions from JavaScript (`rpc`): https://supabase.com/docs/reference/javascript/rpc

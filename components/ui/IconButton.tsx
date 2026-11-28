@@ -3,6 +3,7 @@
 import type { LucideIcon } from 'lucide-react-native';
 import { Pressable, StyleSheet, type StyleProp, type ViewStyle } from 'react-native';
 
+import { ariaProps } from '@/lib/ariaProps';
 import { opacity, radius, TOUCH_TARGET, useTheme } from '@/lib/theme';
 
 import { Icon } from './Icon';
@@ -16,10 +17,12 @@ type Props = {
   /** `danger` for removing things: the press shows red so the result is clear. */
   tone?: 'neutral' | 'danger';
   disabled?: boolean;
+  /** For a button that opens and closes something (a menu, a panel): its open state. Omit otherwise. */
+  expanded?: boolean;
   style?: StyleProp<ViewStyle>;
 };
 
-export function IconButton({ icon, accessibilityLabel, accessibilityHint, onPress, tone = 'neutral', disabled = false, style }: Props) {
+export function IconButton({ icon, accessibilityLabel, accessibilityHint, onPress, tone = 'neutral', disabled = false, expanded, style }: Props) {
   const { colors } = useTheme();
   const { focusProps, ringStyle } = useFocusRing();
   return (
@@ -27,7 +30,10 @@ export function IconButton({ icon, accessibilityLabel, accessibilityHint, onPres
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel}
       accessibilityHint={accessibilityHint}
-      accessibilityState={{ disabled }}
+      accessibilityState={expanded === undefined ? { disabled } : { disabled, expanded }}
+      // Web: react-native-web drops accessibilityState (lib/ariaProps.ts). Only `expanded`, so other
+      // icon buttons' DOM is unchanged.
+      {...ariaProps(expanded === undefined ? undefined : { expanded })}
       disabled={disabled}
       onPress={onPress}
       {...focusProps}

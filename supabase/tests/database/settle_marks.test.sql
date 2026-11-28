@@ -22,6 +22,22 @@ create extension if not exists pgtap with schema extensions;
 
 select plan(57);
 
+-- Who paid 4a (20261127140001): the mark columns moved off bill_participants into
+-- public.bill_payments / bill_payment_flags. This temp view gives each participant's old columns
+-- (their pair toward the bill's current payer, contract P; the flag to that payer) so the
+-- readbacks below keep their shape. Read as the owner only (it is not granted to client roles).
+create temp view bp_marks as
+select bp.bill_id, bp.user_id, bp.added, bp.joined_at,
+       case when ps.net > 0 then ps.mark_at end as settled_at,
+       case when ps.net > 0 then ps.net::integer end as settled_cents,
+       case when ps.net > 0 then ps.method end as settled_method,
+       f.cents as not_received_cents, f.method as not_received_method, f.to_user as not_received_by
+from public.bill_participants as bp
+join public.bills as b on b.id = bp.bill_id
+cross join lateral private.pair_state(bp.bill_id, bp.user_id, b.payer_id) as ps
+left join public.bill_payment_flags as f
+  on f.bill_id = bp.bill_id and f.from_user = bp.user_id and f.to_user = b.payer_id;
+
 insert into auth.users (id, email, raw_user_meta_data) values
   ('f1000000-0000-0000-0000-000000000001', 'marks-a@test.local', '{"full_name":"Hana"}'::jsonb),
   ('f2000000-0000-0000-0000-000000000002', 'marks-b@test.local', '{"full_name":"Sam"}'::jsonb),
@@ -163,18 +179,18 @@ select ok(
 -- ---------------------------------------------------------------------------
 select ok(
   (select bool_and(prosecdef and proconfig = array['search_path=""']) from pg_proc
-   where oid in ('public.mark_paid(uuid,uuid,integer)'::regprocedure,
-                 'public.unmark_paid(uuid,uuid)'::regprocedure)),
+   where oid in ('public.mark_paid(uuid,uuid,integer,text,text)'::regprocedure,
+                 'public.unmark_paid(uuid,uuid,uuid)'::regprocedure)),
   'c23: mark_paid and unmark_paid are security definer with an empty search_path');
 select ok(
-  has_function_privilege('authenticated', 'public.mark_paid(uuid,uuid,integer)', 'execute')
-  and not has_function_privilege('anon', 'public.mark_paid(uuid,uuid,integer)', 'execute')
-  and not has_function_privilege('public', 'public.mark_paid(uuid,uuid,integer)', 'execute'),
+  has_function_privilege('authenticated', 'public.mark_paid(uuid,uuid,integer,text,text)', 'execute')
+  and not has_function_privilege('anon', 'public.mark_paid(uuid,uuid,integer,text,text)', 'execute')
+  and not has_function_privilege('public', 'public.mark_paid(uuid,uuid,integer,text,text)', 'execute'),
   'c23: mark_paid is executable by authenticated only');
 select ok(
-  has_function_privilege('authenticated', 'public.unmark_paid(uuid,uuid)', 'execute')
-  and not has_function_privilege('anon', 'public.unmark_paid(uuid,uuid)', 'execute')
-  and not has_function_privilege('public', 'public.unmark_paid(uuid,uuid)', 'execute'),
+  has_function_privilege('authenticated', 'public.unmark_paid(uuid,uuid,uuid)', 'execute')
+  and not has_function_privilege('anon', 'public.unmark_paid(uuid,uuid,uuid)', 'execute')
+  and not has_function_privilege('public', 'public.unmark_paid(uuid,uuid,uuid)', 'execute'),
   'c23: unmark_paid is executable by authenticated only');
 
 -- ---------------------------------------------------------------------------
@@ -183,11 +199,11 @@ select ok(
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"f2000000-0000-0000-0000-000000000002","role":"authenticated"}';
 select lives_ok(
-  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 1510) $$,
+  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 1510, 'other') $$,
   'c15: B marks 1510 paid to A');
 reset role;
 select results_eq(
-  $$ select user_id, settled_cents, settled_at is not null from public.bill_participants
+  $$ select user_id, settled_cents, settled_at is not null from pg_temp.bp_marks
      where bill_id = current_setting('test.w_id')::uuid order by user_id $$,
   $$ values ('f1000000-0000-0000-0000-000000000001'::uuid, null::integer, false),
             ('f2000000-0000-0000-0000-000000000002'::uuid, 1510, true),
@@ -197,10 +213,10 @@ select results_eq(
   $$ select actor_id, details from public.bill_events
      where bill_id = current_setting('test.w_id')::uuid and kind = 'marked_paid' $$,
   $$ values ('f2000000-0000-0000-0000-000000000002'::uuid,
-             '{"payer_id":"f1000000-0000-0000-0000-000000000001","cents":1510}'::jsonb) $$,
-  'c15: one marked_paid {payer_id A, cents 1510}, actor B');
+             '{"payer_id":"f1000000-0000-0000-0000-000000000001","cents":1510,"method":"other"}'::jsonb) $$,
+  'c15: one marked_paid {payer_id A, cents 1510, method other}, actor B');
 do $$ begin
-  perform set_config('test.b_at', (select settled_at::text from public.bill_participants
+  perform set_config('test.b_at', (select settled_at::text from pg_temp.bp_marks
     where bill_id = current_setting('test.w_id')::uuid and user_id = 'f2000000-0000-0000-0000-000000000002'), true);
 end $$;
 
@@ -210,12 +226,12 @@ end $$;
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"f2000000-0000-0000-0000-000000000002","role":"authenticated"}';
 select lives_ok(
-  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 1600) $$,
+  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 1600, 'other') $$,
   'c16: B marks again with 1600 without an error');
 reset role;
 select ok(
   (select settled_cents = 1510 and settled_at = current_setting('test.b_at')::timestamptz
-   from public.bill_participants
+   from pg_temp.bp_marks
    where bill_id = current_setting('test.w_id')::uuid and user_id = 'f2000000-0000-0000-0000-000000000002')
   and (select count(*) = 1 from public.bill_events
        where bill_id = current_setting('test.w_id')::uuid and kind = 'marked_paid'),
@@ -227,17 +243,17 @@ select ok(
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"f2000000-0000-0000-0000-000000000002","role":"authenticated"}';
 select throws_ok(
-  $$ select public.mark_paid(current_setting('test.k2_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 700) $$,
+  $$ select public.mark_paid(current_setting('test.k2_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 700, 'other') $$,
   '22023', 'not_complete', 'c17 K2: 22023 not_complete');
 select throws_ok(
-  $$ select public.mark_paid(current_setting('test.k3_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 100) $$,
+  $$ select public.mark_paid(current_setting('test.k3_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 100, 'other') $$,
   '22023', 'not_complete', 'c17 K3: 22023 not_complete');
 select throws_ok(
-  $$ select public.mark_paid(current_setting('test.k5_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 100) $$,
+  $$ select public.mark_paid(current_setting('test.k5_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 100, 'other') $$,
   '22023', 'not_complete', 'c17 K5: 22023 not_complete');
 reset role;
 select ok(
-  (select count(*) = 0 from public.bill_participants
+  (select count(*) = 0 from pg_temp.bp_marks
    where bill_id in (current_setting('test.k2_id')::uuid, current_setting('test.k3_id')::uuid,
                      current_setting('test.k5_id')::uuid)
      and settled_at is not null)
@@ -253,45 +269,45 @@ select ok(
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"f1000000-0000-0000-0000-000000000001","role":"authenticated"}';
 select throws_ok(
-  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 2090) $$,
+  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 2090, 'other') $$,
   '22023', 'is_payer', 'c18: A (the payer) gets 22023 is_payer');
 set local request.jwt.claims = '{"sub":"f4000000-0000-0000-0000-000000000004","role":"authenticated"}';
 select throws_ok(
-  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f2000000-0000-0000-0000-000000000002', 100) $$,
+  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f2000000-0000-0000-0000-000000000002', 100, 'other') $$,
   '22023', 'payer_changed', 'c18: D naming B as payer while the payer is A gets 22023 payer_changed');
 select throws_ok(
-  $$ select public.mark_paid(current_setting('test.w_id')::uuid, null, 100) $$,
+  $$ select public.mark_paid(current_setting('test.w_id')::uuid, null, 100, 'other') $$,
   '22023', 'payer_changed', 'c18: a null payer id gets 22023 payer_changed');
 
 -- ---------------------------------------------------------------------------
 -- Criterion 19: the amount rule C2 (as D on W, payer A, complete)
 -- ---------------------------------------------------------------------------
 select throws_ok(
-  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 0) $$,
+  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 0, 'other') $$,
   '22023', 'invalid_amount', 'c19 A1: 0 gives 22023 invalid_amount');
 select throws_ok(
-  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 100000000) $$,
+  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 100000000, 'other') $$,
   '22023', 'invalid_amount', 'c19 A4: 100000000 gives 22023 invalid_amount');
 select throws_ok(
-  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', -5) $$,
+  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', -5, 'other') $$,
   '22023', 'invalid_amount', 'c19 A5: -5 gives 22023 invalid_amount');
 select throws_ok(
-  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', null) $$,
+  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', null, 'other') $$,
   '22023', 'invalid_amount', 'c19 A6: null gives 22023 invalid_amount');
 select lives_ok(
-  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 1) $$,
+  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 1, 'other') $$,
   'c19 A2: 1 is accepted');
 set local request.jwt.claims = '{"sub":"f2000000-0000-0000-0000-000000000002","role":"authenticated"}';
 select lives_ok(
-  $$ select public.mark_paid(current_setting('test.k1_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 99999999) $$,
+  $$ select public.mark_paid(current_setting('test.k1_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 99999999, 'other') $$,
   'c19 A3: 99999999 is accepted');
 reset role;
 select is(
-  (select settled_cents from public.bill_participants
+  (select settled_cents from pg_temp.bp_marks
    where bill_id = current_setting('test.w_id')::uuid and user_id = 'f4000000-0000-0000-0000-000000000004'),
   1, 'c19 A2: 1 is stored exactly');
 select is(
-  (select settled_cents from public.bill_participants
+  (select settled_cents from pg_temp.bp_marks
    where bill_id = current_setting('test.k1_id')::uuid and user_id = 'f2000000-0000-0000-0000-000000000002'),
   99999999, 'c19 A3: 99999999 is stored exactly');
 select is(
@@ -306,11 +322,11 @@ select is(
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"f1000000-0000-0000-0000-000000000001","role":"authenticated"}';
 select throws_ok(
-  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 0) $$,
+  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 0, 'other') $$,
   '22023', 'invalid_amount', 'c22: the payer with an invalid amount gets invalid_amount, not is_payer');
 set local request.jwt.claims = '{"sub":"f2000000-0000-0000-0000-000000000002","role":"authenticated"}';
 select throws_ok(
-  $$ select public.mark_paid(current_setting('test.k2_id')::uuid, 'f4000000-0000-0000-0000-000000000004', 100) $$,
+  $$ select public.mark_paid(current_setting('test.k2_id')::uuid, 'f4000000-0000-0000-0000-000000000004', 100, 'other') $$,
   '22023', 'payer_changed', 'c22: a stale payer on an incomplete bill gets payer_changed, not not_complete');
 
 -- ---------------------------------------------------------------------------
@@ -318,32 +334,32 @@ select throws_ok(
 -- ---------------------------------------------------------------------------
 set local request.jwt.claims = '{"sub":"f3000000-0000-0000-0000-000000000003","role":"authenticated"}';
 select throws_ok(
-  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 100) $$,
+  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 100, 'other') $$,
   '42501', 'not_allowed', 'c20: C (outsider) gets 42501 from mark_paid');
 select throws_ok(
-  $$ select public.unmark_paid(current_setting('test.w_id')::uuid, 'f2000000-0000-0000-0000-000000000002') $$,
+  $$ select public.unmark_paid(current_setting('test.w_id')::uuid, 'f2000000-0000-0000-0000-000000000002', 'f1000000-0000-0000-0000-000000000001') $$,
   '42501', 'not_allowed', 'c20: C (outsider) gets 42501 from unmark_paid');
 select throws_ok(
-  $$ select public.unmark_paid(current_setting('test.w_id')::uuid, 'f3000000-0000-0000-0000-000000000003') $$,
+  $$ select public.unmark_paid(current_setting('test.w_id')::uuid, 'f3000000-0000-0000-0000-000000000003', 'f1000000-0000-0000-0000-000000000001') $$,
   '42501', 'not_allowed', 'c20: C unmarking themself on a bill they aren''t in gets 42501');
 set local request.jwt.claims = '{"sub":"f2000000-0000-0000-0000-000000000002","role":"authenticated"}';
 select throws_ok(
-  $$ select public.mark_paid('00000000-0000-0000-0000-00000000dead', 'f1000000-0000-0000-0000-000000000001', 100) $$,
+  $$ select public.mark_paid('00000000-0000-0000-0000-00000000dead', 'f1000000-0000-0000-0000-000000000001', 100, 'other') $$,
   '42501', 'not_allowed', 'c20: an unknown bill gets 42501 from mark_paid');
 select throws_ok(
-  $$ select public.unmark_paid('00000000-0000-0000-0000-00000000dead', 'f2000000-0000-0000-0000-000000000002') $$,
+  $$ select public.unmark_paid('00000000-0000-0000-0000-00000000dead', 'f2000000-0000-0000-0000-000000000002', 'f1000000-0000-0000-0000-000000000001') $$,
   '42501', 'not_allowed', 'c20: an unknown bill gets 42501 from unmark_paid');
 set local request.jwt.claims = '{"role":"authenticated"}';
 select throws_ok(
-  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 100) $$,
+  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 100, 'other') $$,
   '42501', 'not_allowed', 'c20: no user id gets 42501 from mark_paid');
 set local role anon;
 set local request.jwt.claims = '{"role":"anon"}';
 select throws_ok(
-  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 100) $$,
+  $$ select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 100, 'other') $$,
   '42501', null, 'c20: anon gets 42501 from mark_paid');
 select throws_ok(
-  $$ select public.unmark_paid(current_setting('test.w_id')::uuid, 'f2000000-0000-0000-0000-000000000002') $$,
+  $$ select public.unmark_paid(current_setting('test.w_id')::uuid, 'f2000000-0000-0000-0000-000000000002', 'f1000000-0000-0000-0000-000000000001') $$,
   '42501', null, 'c20: anon gets 42501 from unmark_paid');
 reset role;
 
@@ -354,11 +370,11 @@ reset role;
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"f4000000-0000-0000-0000-000000000004","role":"authenticated"}';
 select throws_ok(
-  $$ select public.unmark_paid(current_setting('test.w_id')::uuid, 'f2000000-0000-0000-0000-000000000002') $$,
+  $$ select public.unmark_paid(current_setting('test.w_id')::uuid, 'f2000000-0000-0000-0000-000000000002', 'f1000000-0000-0000-0000-000000000001') $$,
   '42501', 'not_allowed', 'c21: D unmarking B gets 42501');
 reset role;
 select is(
-  (select settled_cents from public.bill_participants
+  (select settled_cents from pg_temp.bp_marks
    where bill_id = current_setting('test.w_id')::uuid and user_id = 'f2000000-0000-0000-0000-000000000002'),
   1510, 'c21: B''s mark is kept after D''s refused undo');
 
@@ -366,32 +382,32 @@ select is(
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"f1000000-0000-0000-0000-000000000001","role":"authenticated"}';
 select lives_ok(
-  $$ select public.unmark_paid(current_setting('test.w_id')::uuid, 'f2000000-0000-0000-0000-000000000002') $$,
+  $$ select public.unmark_paid(current_setting('test.w_id')::uuid, 'f2000000-0000-0000-0000-000000000002', 'f1000000-0000-0000-0000-000000000001') $$,
   'c21: the host A undoes B''s mark');
 reset role;
 select ok(
-  (select settled_at is null and settled_cents is null from public.bill_participants
+  (select settled_at is null and settled_cents is null from pg_temp.bp_marks
    where bill_id = current_setting('test.w_id')::uuid and user_id = 'f2000000-0000-0000-0000-000000000002'),
   'c21: B''s mark is cleared by the host');
 
 -- B marks again and undoes it themself.
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"f2000000-0000-0000-0000-000000000002","role":"authenticated"}';
-select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 1510);
+select public.mark_paid(current_setting('test.w_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 1510, 'other');
 select lives_ok(
-  $$ select public.unmark_paid(current_setting('test.w_id')::uuid, 'f2000000-0000-0000-0000-000000000002') $$,
+  $$ select public.unmark_paid(current_setting('test.w_id')::uuid, 'f2000000-0000-0000-0000-000000000002', 'f1000000-0000-0000-0000-000000000001') $$,
   'c21: B undoes their own mark');
 reset role;
 
 -- Payer becomes D (not the host); B marks paid to D; D undoes it as the payer.
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"f1000000-0000-0000-0000-000000000001","role":"authenticated"}';
-select public.set_payer(current_setting('test.w_id')::uuid, 'f4000000-0000-0000-0000-000000000004', 1);
+select public.set_payer(current_setting('test.w_id')::uuid, 'f4000000-0000-0000-0000-000000000004');
 set local request.jwt.claims = '{"sub":"f2000000-0000-0000-0000-000000000002","role":"authenticated"}';
-select public.mark_paid(current_setting('test.w_id')::uuid, 'f4000000-0000-0000-0000-000000000004', 1510);
+select public.mark_paid(current_setting('test.w_id')::uuid, 'f4000000-0000-0000-0000-000000000004', 1510, 'other');
 set local request.jwt.claims = '{"sub":"f4000000-0000-0000-0000-000000000004","role":"authenticated"}';
 select lives_ok(
-  $$ select public.unmark_paid(current_setting('test.w_id')::uuid, 'f2000000-0000-0000-0000-000000000002') $$,
+  $$ select public.unmark_paid(current_setting('test.w_id')::uuid, 'f2000000-0000-0000-0000-000000000002', 'f4000000-0000-0000-0000-000000000004') $$,
   'c21: the payer D undoes B''s mark');
 reset role;
 
@@ -417,10 +433,10 @@ select is(
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"f1000000-0000-0000-0000-000000000001","role":"authenticated"}';
 select lives_ok(
-  $$ select public.unmark_paid(current_setting('test.w_id')::uuid, 'f2000000-0000-0000-0000-000000000002') $$,
+  $$ select public.unmark_paid(current_setting('test.w_id')::uuid, 'f2000000-0000-0000-0000-000000000002', 'f4000000-0000-0000-0000-000000000004') $$,
   'c21: undoing an unmarked target raises nothing');
 select lives_ok(
-  $$ select public.unmark_paid(current_setting('test.w_id')::uuid, 'f3000000-0000-0000-0000-000000000003') $$,
+  $$ select public.unmark_paid(current_setting('test.w_id')::uuid, 'f3000000-0000-0000-0000-000000000003', 'f4000000-0000-0000-0000-000000000004') $$,
   'c21: undoing a non-participant target raises nothing');
 reset role;
 select is(
@@ -466,11 +482,11 @@ select ok(private.bill_is_complete(current_setting('test.k6_id')::uuid),
 set local role authenticated;
 set local request.jwt.claims = '{"sub":"f2000000-0000-0000-0000-000000000002","role":"authenticated"}';
 select throws_ok(
-  $$ select public.mark_paid(current_setting('test.k6_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 1) $$,
+  $$ select public.mark_paid(current_setting('test.k6_id')::uuid, 'f1000000-0000-0000-0000-000000000001', 1, 'other') $$,
   '22023', 'all_zero', 'K6: mark_paid raises 22023 all_zero (K6 closed, SE-3)');
 reset role;
 select ok(
-  (select settled_at is null and settled_cents is null from public.bill_participants
+  (select settled_at is null and settled_cents is null from pg_temp.bp_marks
    where bill_id = current_setting('test.k6_id')::uuid and user_id = 'f2000000-0000-0000-0000-000000000002')
   and not exists (select 1 from public.bill_events
                   where bill_id = current_setting('test.k6_id')::uuid and kind = 'marked_paid'),

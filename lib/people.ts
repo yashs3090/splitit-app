@@ -1,5 +1,5 @@
 // "People you've split with": the list, search, row captions and who can still be added to a bill.
-// Spec: docs/specs/2026-11-24-people-and-invites.md (L1, L2, L4, D6, D7; Tasks 3 and 4).
+// Spec: docs/specs/2026-11-24-people-and-invites.md (L1, L2, L4, D6, D7; Tasks 3 and 4); group-only links: docs/specs/2026-11-26-groups-mvp.md (U-G5, T11).
 //
 // The app never decides who is linked (rule L1) or how the list is ranked (L2): both live only in
 // the database's people_i_split_with(). Everything here keeps the order it was given.
@@ -11,9 +11,9 @@ export type Person = {
   userId: string;
   displayName: string | null;
   venmoUsername: string | null;
-  /** Bills you're both linked through (L1); always an integer ≥ 1. */
+  /** Bills you're both linked through (L1); an integer ≥ 0. 0 means linked only through a group (Groups U-G5). */
   sharedBills: number;
-  /** created_at of the newest of those bills (ISO timestamp). */
+  /** created_at of the newest of those bills, or the later group join (ISO timestamp). */
   lastSharedAt: string;
 };
 
@@ -91,16 +91,32 @@ function billCount(n: number): string {
   return n === 1 ? '1 bill' : `${n} bills`;
 }
 
-/** "1 bill · Nov 20", "4 bills · last Nov 20", plus " · @handle" for a same-name person (PI-10). */
+const IN_A_GROUP = 'In a group together';
+
+/**
+ * "1 bill · Nov 20", "4 bills · last Nov 20", "In a group together" (no shared bill, Groups T11),
+ * plus " · @handle" for a same-name person (PI-10).
+ */
 export function personCaption(person: Person, all: readonly Person[], formatDate: FormatDate): string {
+  if (person.sharedBills === 0) {
+    const handle = shownHandle(person, all);
+    return `${IN_A_GROUP}${handle === null ? '' : ` · @${handle}`}`;
+  }
   const date = formatDate(new Date(person.lastSharedAt));
   const when = person.sharedBills === 1 ? date : `last ${date}`;
   const handle = shownHandle(person, all);
   return `${billCount(person.sharedBills)} · ${when}${handle === null ? '' : ` · @${handle}`}`;
 }
 
-/** "Sam Lee, 4 bills together, last on Nov 20" (", Venmo @sam-lee" when the caption shows the handle). */
+/**
+ * "Sam Lee, 4 bills together, last on Nov 20", "Sam Lee, in a group together" (no shared bill),
+ * plus ", Venmo @sam-lee" when the caption shows the handle.
+ */
 export function personA11yLabel(person: Person, all: readonly Person[], formatDate: FormatDate): string {
+  if (person.sharedBills === 0) {
+    const handle = shownHandle(person, all);
+    return `${personName(person)}, in a group together${handle === null ? '' : `, Venmo @${handle}`}`;
+  }
   const date = formatDate(new Date(person.lastSharedAt));
   const when = person.sharedBills === 1 ? `on ${date}` : `last on ${date}`;
   const handle = shownHandle(person, all);
@@ -124,7 +140,7 @@ function parsePerson(v: unknown): Person {
   if (venmo_username !== null && (typeof venmo_username !== 'string' || !VENMO_USERNAME_PATTERN.test(venmo_username))) {
     throw new Malformed();
   }
-  if (typeof shared_bills !== 'number' || !Number.isInteger(shared_bills) || shared_bills < 1) throw new Malformed();
+  if (typeof shared_bills !== 'number' || !Number.isInteger(shared_bills) || shared_bills < 0) throw new Malformed();
   if (typeof last_shared_at !== 'string' || Number.isNaN(new Date(last_shared_at).getTime())) throw new Malformed();
   return {
     userId: user_id,

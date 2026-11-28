@@ -22,7 +22,8 @@ MCP access equals your Vercel account's access. Keep Claude Code's confirmation 
 ## Deploying SplitIt's web build to Vercel
 `vercel.json` (repo root, added 2026-11-25) holds the build settings, so the dashboard's Build/Output/Install fields can stay empty:
 - install `npm ci`, build `npm run export:web`, output `dist`, framework `null` ("Other").
-- Every path rewrites to `/index.html` (single-page app), so `/b/<code>` doesn't 404. Real files in `dist/` are served first.
+- Every path except `/.well-known/…` rewrites to `/index.html` (single-page app), so `/b/<code>` doesn't 404. Real files in `dist/` are served first. `/.well-known/` is left out so a missing app-links file is a 404, not `index.html` (2026-11-26, [app links](app-links.md)); both well-known files are sent as `application/json`.
+- App-links variables (optional, not `EXPO_PUBLIC_`): `APPLE_TEAM_ID` and `ANDROID_CERT_SHA256` make the build write `/.well-known/apple-app-site-association` and `/.well-known/assetlinks.json`. Leave them unset until the paid Apple account / signing keys exist ([app links](app-links.md)).
 - Cache: `/_expo/static/*` (content-hashed) for a year; `/tesseract/*` and `/opencv/*` (names not hashed) for a day, then refreshed in the background for up to a week.
 - `/tesseract/lang/*.gz` is sent as `application/gzip`, with no `Content-Encoding`, so the browser hands Tesseract the gzip bytes unchanged *(unverified on the live site: check a real scan)*.
 

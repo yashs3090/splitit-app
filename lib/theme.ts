@@ -3,6 +3,8 @@
 // text pairs are >= 4.5:1 and input borders >= 3:1 in both modes.
 import { useColorScheme, type TextStyle, type ViewStyle } from 'react-native';
 
+import { resolveScheme, useThemePreference } from './themePreference';
+
 export type Palette = {
   background: string;
   surface: string;
@@ -22,6 +24,12 @@ export type Palette = {
   successSurface: string;
   warning: string;
   warningSurface: string;
+  /**
+   * Feed dispute marker ("says they didn't get your $X"): a light orange, so red (`danger`) stays
+   * for app errors. `dispute` is >= 4.5:1 on `disputeSurface`, `surface` and `background`.
+   */
+  disputeSurface: string;
+  dispute: string;
   focus: string;
   /** Dims the screen behind a sheet. */
   scrim: string;
@@ -45,6 +53,8 @@ export const colors: { light: Palette; dark: Palette } = {
     successSurface: '#ECFDF3',
     warning: '#93370D',
     warningSurface: '#FFFAEB',
+    disputeSurface: '#FFF6ED',
+    dispute: '#C4320A',
     focus: '#0F766E',
     scrim: 'rgba(17, 24, 39, 0.45)',
   },
@@ -65,6 +75,8 @@ export const colors: { light: Palette; dark: Palette } = {
     successSurface: '#0F2A1D',
     warning: '#FEC84B',
     warningSurface: '#33260B',
+    disputeSurface: '#3A1D0B',
+    dispute: '#FDBA8C',
     focus: '#5EEAD4',
     scrim: 'rgba(0, 0, 0, 0.6)',
   },
@@ -143,7 +155,12 @@ export const tabularNums: TextStyle = { fontVariant: ['tabular-nums'] };
 
 export type Theme = { scheme: 'light' | 'dark'; colors: Palette };
 
+/**
+ * The one source of the color scheme: the Appearance choice (lib/themePreference.ts) when it's
+ * Light or Dark, otherwise the device's. Nothing else calls useColorScheme directly.
+ */
 export function useTheme(): Theme {
-  const scheme = useColorScheme() === 'dark' ? 'dark' : 'light';
+  const device = useColorScheme();
+  const scheme = resolveScheme(useThemePreference(), device);
   return { scheme, colors: colors[scheme] };
 }

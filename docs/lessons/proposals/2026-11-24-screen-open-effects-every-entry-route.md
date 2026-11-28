@@ -13,6 +13,7 @@
 - 2026-11-24 "Flow tests missed a path again: home mounting while the invite resumes" [testing] (led to the applied proposal `2026-11-24-flow-tests-every-entry-path.md`)
 - 2026-11-24 "Entry-route tests missed a third time: 'opening a bill marks it seen' wasn't tested per route" [testing]: R1, criterion 41 of docs/specs/2026-11-24-bill-markers-and-notices.md
 - 2026-11-24 "A 'matches only lib/X.ts' grep also matched X's test file" [testing], plus the six earlier grep entries it cites
+- 2026-11-28 "Entry-route tests missed again: per-route tests for the new tabs" [testing] (added in the tab-bar-and-Activity retro): review R5 of docs/specs/2026-11-28-tab-bar-and-activity.md. Marking seen and refreshing badges on each way into Activity, Groups and the bills lacked per-route tests. This is the fifth occurrence. It's exactly the "screen-open effect" case Changes 1–4 name, so no rewording is needed.
 
 ## Change 1: `.claude/agents/product-manager.md`, new bullet in Rules, directly before "- Write only under `docs/`. Never edit code."
 

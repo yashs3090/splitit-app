@@ -73,7 +73,7 @@ beforeEach(() => {
 
 async function openHome() {
   const router = renderRouter(ROUTES, { initialUrl: '/' });
-  await screen.findByText('Your bills');
+  await screen.findByRole('header', { name: 'SplitIt' });
   return router;
 }
 async function press(label: string) {
@@ -83,10 +83,11 @@ async function press(label: string) {
 }
 
 describe('home: Profile entry point (Q1: sign out on Profile only)', () => {
-  it('35: a labelled "Profile" control opens /profile; home has no "Sign out"', async () => {
+  it('35: a labelled "Profile" control (the Profile tab) opens /profile; home has no "Sign out"', async () => {
     const router = await openHome();
     expect(screen.queryByText('Sign out')).toBeNull();
-    expect(screen.getByLabelText('Profile').props.accessibilityHint).toBeTruthy();
+    // Tab-bar spec Contract C: a tab's label is all it says (react-native-web drops hints); it's a tab.
+    expect(screen.getByRole('tab', { name: 'Profile' })).toBeTruthy();
     await press('Profile');
     await waitFor(() => expect(router.getPathname()).toBe('/profile'));
     expect(await screen.findByText('Sign out')).toBeTruthy();
@@ -118,10 +119,11 @@ describe('home: the Venmo card (Q2 option A)', () => {
     expect(screen.queryByText(PROMPT)).toBeNull();
 
     // Leave and come back: the server still says pending, but the user already said "Not now" here.
+    // Tab-bar spec Task 5: Profile is a tab; Home stays mounted and is focused again from the Tabs tab.
     await press('Profile');
     await screen.findByLabelText('Venmo username');
-    await press('Back');
-    await screen.findByText('Your bills');
+    await press('Tabs');
+    await screen.findByRole('header', { name: 'SplitIt' });
     await waitFor(() => expect(rpcCalls('venmo_prompt_pending').length).toBeGreaterThanOrEqual(2));
     expect(screen.queryByText(PROMPT)).toBeNull();
   });
@@ -141,13 +143,14 @@ describe('home: the Venmo card (Q2 option A)', () => {
     expect(screen.queryByText(PROMPT)).toBeNull();
   });
 
-  it('"Add Venmo" opens Profile; after a save, back on home the card is gone (re-checked on focus)', async () => {
+  it('"Add Venmo" opens Profile (/account, above the tabs); after a save, back on home the card is gone (re-checked on focus)', async () => {
     const push = jest.spyOn(globalRouter, 'push');
     const router = await openHome();
     await screen.findByText(PROMPT);
     await press('Add Venmo');
-    await waitFor(() => expect(router.getPathname()).toBe('/profile'));
-    expect(push).toHaveBeenCalledWith('/profile'); // the spy sees the card's navigation (used by R1 below)
+    // Tab-bar spec criterion 41: Profile with a Back, so one Back returns to Home.
+    await waitFor(() => expect(router.getPathname()).toBe('/account'));
+    expect(push).toHaveBeenCalledWith('/account'); // the spy sees the card's navigation (used by R1 below)
     expect(rpcCalls('dismiss_venmo_prompt')).toHaveLength(0); // opening Profile isn't an answer
 
     fireEvent.changeText(await screen.findByLabelText('Venmo username'), '@ada-pays');
@@ -173,10 +176,11 @@ describe('home: the Venmo card (Q2 option A)', () => {
       new Promise<FakeResult>((resolve) => {
         release = () => resolve({ data: true, error: null });
       });
+    // Tab-bar spec Task 5: Profile is a tab; Home stays mounted and is focused again from the Tabs tab.
     await press('Profile');
     await screen.findByLabelText('Venmo username');
-    await press('Back');
-    await screen.findByText('Your bills');
+    await press('Tabs');
+    await screen.findByRole('header', { name: 'SplitIt' });
     await waitFor(() => expect(rpcCalls('venmo_prompt_pending')).toHaveLength(2));
 
     expect(screen.getByText(PROMPT)).toBeTruthy(); // still shown from before
@@ -211,7 +215,7 @@ describe('home: the Venmo card (Q2 option A)', () => {
       jest.restoreAllMocks();
     });
 
-    it('resumes to the bill; the card is gone, nothing dismissed, nothing pushed /profile', async () => {
+    it('resumes to the bill; the card is gone, nothing dismissed, nothing pushed /profile or /account', async () => {
       if (platform === 'web') jest.replaceProperty(Platform, 'OS', 'web');
       const push = jest.spyOn(globalRouter, 'push');
       supabase.__setInitialSession(fakeSession());
@@ -229,7 +233,8 @@ describe('home: the Venmo card (Q2 option A)', () => {
       expect(screen.queryByText(PROMPT)).toBeNull();
       expect(rpcCalls('dismiss_venmo_prompt')).toHaveLength(0);
       expect(push).not.toHaveBeenCalledWith('/profile');
-      expect(push.mock.calls.some(([href]) => String(href).includes('profile'))).toBe(false);
+      expect(push).not.toHaveBeenCalledWith('/account');
+      expect(push.mock.calls.some(([href]) => /profile|account/.test(String(href)))).toBe(false);
     });
   });
 });

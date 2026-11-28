@@ -62,7 +62,9 @@
         {
           "contactsPermission": "SplitIt opens your contacts only when you pick someone to text a bill link to. Your contacts stay on your phone."
         }
-      ]
+      ],
+      "./plugins/withoutPushEntitlement",
+      "expo-notifications"
     ],
     "experiments": {
       "reactCompiler": true

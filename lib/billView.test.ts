@@ -93,6 +93,12 @@ describe('names', () => {
     expect(initials('  Mary Jo  Kim ')).toBe('MK');
     expect(initials(null)).toBe('?');
     expect(initials('  ')).toBe('?');
+    // Punctuation and bracketed notes are never initials (a "(demo)" suffix read as "T(").
+    expect(initials('Tejesh (demo)')).toBe('T');
+    expect(initials('Sam (demo) Lee')).toBe('SL');
+    expect(initials('"Ana" - Ruiz')).toBe('AR');
+    expect(initials('(demo)')).toBe('?');
+    expect(initials('李 明')).toBe('李明');
     expect(initials('Émile Zola')).toBe('ÉZ');
   });
   it('joins names as "Pat", "Pat and Sam", "Pat, Sam and Ali"', () => {
@@ -393,6 +399,7 @@ describe('home list label (Task 12)', () => {
     seen: false,
     claimedAny: false,
     complete: false,
+    seenAt: null,
   };
   it('reads "<host>\'s bill · date · $total", or "Your bill" for the host', () => {
     expect(billListLabel(summary, B, fmt)).toBe("Hana Lee's bill · Nov 20 · $44.80");

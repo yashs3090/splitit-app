@@ -16,8 +16,13 @@ type Props = {
   variant?: ButtonVariant;
   /** Icon before the label (e.g. Plus), in the label's color; hidden from screen readers. */
   icon?: LucideIcon;
-  /** No side padding (the label sits on the column edge); keeps the 44-pt minimum width. */
-  flush?: boolean;
+  /**
+   * No side padding (the label sits on the column edge); keeps the 44 × 44 minimum box.
+   * `true` centres the label in that box (as before); 'start' / 'end' put it on the leading /
+   * trailing edge, so a short label ("Yes", "Undo") lines up with the column instead of sitting
+   * up to 8 pt in. Card ghost rows use 'start', row controls 'end'.
+   */
+  flush?: boolean | 'start' | 'end';
   accessibilityLabel?: string;
   /** Said after the label when the result (or why it's disabled) isn't obvious. */
   accessibilityHint?: string;
@@ -64,6 +69,9 @@ export function Button({
       accessibilityLabel={accessibilityLabel}
       accessibilityHint={accessibilityHint}
       accessibilityState={{ disabled: inactive, busy: loading }}
+      // Web (QA F1): react-native-web drops accessibilityState; these reach the DOM (only when true).
+      aria-busy={loading || undefined}
+      aria-disabled={inactive || undefined}
       disabled={inactive}
       onPress={onPress}
       {...focusProps}
@@ -78,10 +86,12 @@ export function Button({
         style,
       ]}
     >
-      <View style={styles.content}>
+      <View style={[styles.content, flush === 'start' && styles.contentStart, flush === 'end' && styles.contentEnd]}>
         {loading ? <ActivityIndicator size="small" color={v.fg} /> : null}
         {icon && !loading ? <Icon icon={icon} color={v.fg} /> : null}
-        <Text style={[type.label, styles.label, { color: v.fg }]}>{label}</Text>
+        <Text style={[type.label, styles.label, flush === 'start' && styles.labelStart, flush === 'end' && styles.labelEnd, { color: v.fg }]}>
+          {label}
+        </Text>
       </View>
     </Pressable>
   );
@@ -103,6 +113,12 @@ const styles = StyleSheet.create({
   content: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: space.sm },
   // Long labels ("Pay Hana Lee-Watanabe $1.10 more on Venmo") wrap inside the button, centered.
   label: { flexShrink: 1, textAlign: 'center' },
+  // flush 'start' / 'end'. The app is left-to-right only today; check the textAlign pair under
+  // RTL if RTL is ever added (flex-start / flex-end follow the layout direction).
+  contentStart: { justifyContent: 'flex-start' },
+  contentEnd: { justifyContent: 'flex-end' },
+  labelStart: { textAlign: 'left' },
+  labelEnd: { textAlign: 'right' },
   pressed: { opacity: opacity.pressed },
   inactive: { opacity: opacity.disabled },
 });

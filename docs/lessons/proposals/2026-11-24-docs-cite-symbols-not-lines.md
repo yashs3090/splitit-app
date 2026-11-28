@@ -54,6 +54,8 @@ New:
 
 **Extended 2026-11-25 (settle-early retro), third occurrence:** the docs-writer couldn't document review R1 and R6 because it was given the ids without their text. Evidence: log 2026-11-25 "The docs handoff lacked the source material, third time" [process]. The added sentence is "Also give it the review findings and the QA report in full…".
 
+**Fourth occurrence, 2026-11-27 (Groups MVP retro):** the docs-writer was first scoped more narrowly than T19, and skipped the `people-and-membership.md` and `row-level-security.md` concept-note updates T19 required. That happened even though criterion 88 said "The docs-writer reports every T19 bullet". Evidence: log 2026-11-27 "The docs handoff was too narrow again…" [process]. The 2026-11-24 log line says this was "Promoted to `build-task` and `docs-writer`", but neither file has it; this proposal is that promotion. No wording change is needed: Change 3 (hand over the task whole) and Change 4 (report every bullet) cover it. If you approve only part of this proposal, approve Changes 3 and 4.
+
 ## Change 4 (added 2026-11-24, bill-markers retro): `.claude/agents/docs-writer.md`, § Report
 
 Old:

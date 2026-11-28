@@ -571,13 +571,13 @@ describe('claimable discounts (C4)', () => {
     const payerB = settlePlan(E2, 'B', {});
     expect(payerB.status).toBe('ready');
     if (payerB.status !== 'ready') return;
-    expect(payerB.people.find((p) => p.userId === 'A')).toEqual({ userId: 'A', role: 'payer_owes_them', owedCents: -500, mark: null });
+    expect(payerB.people.find((p) => p.userId === 'A')).toEqual({ userId: 'A', role: 'payer_owes_them', owedCents: -500, mark: null, notReceived: null });
     expect(payerB.collectCents).toBe(0);
 
     const payerA = settlePlan(E2, 'A', {});
     expect(payerA.status).toBe('ready');
     if (payerA.status !== 'ready') return;
-    expect(payerA.people.find((p) => p.userId === 'B')).toEqual({ userId: 'B', role: 'owes', owedCents: 1500, mark: null });
+    expect(payerA.people.find((p) => p.userId === 'B')).toEqual({ userId: 'B', role: 'owes', owedCents: 1500, mark: null, notReceived: null });
     expect(payerA.collectCents).toBe(1500);
 
     expect(settlePlan(e1([]), 'A', {})).toEqual({ status: 'blocked', unclaimedRows: 1, unclaimedDiscountRows: 1 });

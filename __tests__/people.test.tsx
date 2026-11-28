@@ -53,8 +53,8 @@ beforeEach(() => {
   supabase.__setRpc((fn) => (fn === 'people_i_split_with' ? people.result : { data: null, error: null }));
 });
 
-async function openProfile() {
-  const router = renderRouter(ROUTES, { initialUrl: '/profile' });
+async function openProfile(initialUrl = '/profile') {
+  const router = renderRouter(ROUTES, { initialUrl });
   await screen.findByLabelText('Venmo username');
   return router;
 }
@@ -142,7 +142,7 @@ describe.each(['ios', 'web'] as const)('Profile: People card (%s)', (os) => {
   });
 
   it('39: a malformed answer is an error too', async () => {
-    people.result = { data: [{ ...person(1, 'Sam', 0) }], error: null };
+    people.result = { data: [{ ...person(1, 'Sam', -1) }], error: null };
     await openProfile();
     expect(await screen.findByText("Couldn't load people.")).toBeTruthy();
   });
@@ -172,7 +172,8 @@ describe.each(['ios', 'web'] as const)('Profile: People card (%s)', (os) => {
     let release: (r: FakeResult) => void = () => {};
     people.result = new Promise<FakeResult>((r) => (release = r));
     const errors = jest.spyOn(console, 'error');
-    const router = await openProfile();
+    // /account: the copy of Profile that Back unmounts (the Profile tab stays mounted when you switch tabs).
+    const router = await openProfile('/account');
     await act(async () => {
       fireEvent.press(screen.getByLabelText('Back'));
     });
@@ -203,6 +204,9 @@ describe.each(['ios', 'web'] as const)('Profile: People card (%s)', (os) => {
     await openProfile();
     const header = await screen.findByRole('header', { name: "People you've split with" });
     expect(header).toBeTruthy();
-    expect(within(screen.UNSAFE_root).queryByLabelText(/^Add /)).toBeNull();
+    // The only "Add …" control on screen is the tab bar's (+), which every tab shows.
+    expect(within(screen.UNSAFE_root).queryAllByLabelText(/^Add /).map((n) => n.props.accessibilityLabel)).toEqual([
+      'Add receipt, opens a photo or typing the items',
+    ]);
   });
 });

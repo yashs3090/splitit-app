@@ -189,6 +189,42 @@ describe('personCaption (D6, PI-10)', () => {
   });
 });
 
+describe('personCaption and personA11yLabel: linked only through a group (Groups T11, criterion 58)', () => {
+  it('0 shared bills → "In a group together" (no date)', () => {
+    const p = person(SAM_ID, 'Sam Lee', { sharedBills: 0 });
+    const seen: Date[] = [];
+    expect(
+      personCaption(p, [p], (d) => {
+        seen.push(d);
+        return 'Nov 20';
+      }),
+    ).toBe('In a group together');
+    expect(seen).toEqual([]);
+  });
+
+  it('keeps the handle suffix for a same-name person', () => {
+    const a = person(ALEX1_ID, 'Alex Kim', { sharedBills: 0, venmoUsername: 'alex-kim-1' });
+    const b = person(ALEX2_ID, 'alex kim', { venmoUsername: 'akim_22' });
+    expect(personCaption(a, [a, b], fmtDate)).toBe('In a group together · @alex-kim-1');
+    expect(personCaption(b, [a, b], fmtDate)).toBe('1 bill · Nov 20 · @akim_22');
+  });
+
+  it('1 and 4 bills are unchanged', () => {
+    const one = person(SAM_ID, 'Sam Lee');
+    const four = person(SAM_ID, 'Sam Lee', { sharedBills: 4 });
+    expect(personCaption(one, [one], fmtDate)).toBe('1 bill · Nov 20');
+    expect(personCaption(four, [four], fmtDate)).toBe('4 bills · last Nov 20');
+  });
+
+  it('the label reads "in a group together"', () => {
+    const p = person(SAM_ID, 'Sam Lee', { sharedBills: 0 });
+    expect(personA11yLabel(p, [p], fmtDate)).toBe('Sam Lee, in a group together');
+    const a = person(ALEX1_ID, 'Alex Kim', { sharedBills: 0, venmoUsername: 'alex-kim-1' });
+    const b = person(ALEX2_ID, 'alex kim');
+    expect(personA11yLabel(a, [a, b], fmtDate)).toBe('Alex Kim, in a group together, Venmo @alex-kim-1');
+  });
+});
+
 describe('personA11yLabel (D6)', () => {
   it('name, bills together and the date', () => {
     const p = person(SAM_ID, 'Sam Lee', { sharedBills: 4 });
@@ -247,6 +283,17 @@ describe('listPeople (D7)', () => {
     rpcReturns([]);
   });
 
+  it('accepts shared_bills 0: a person linked only through a group (Groups T5/T11)', async () => {
+    rpcReturns([raw(SAM_ID, 'Sam', { shared_bills: 0, last_shared_at: '2026-11-26T10:00:00+00:00' })]);
+    const res = await listPeople();
+    expect(res).toEqual({
+      ok: true,
+      people: [
+        { userId: SAM_ID, displayName: 'Sam', venmoUsername: null, sharedBills: 0, lastSharedAt: '2026-11-26T10:00:00+00:00' },
+      ],
+    });
+  });
+
   it('calls people_i_split_with with no arguments and keeps the order it receives', async () => {
     rpcReturns([
       raw(SAM_ID, 'Sam', { shared_bills: 3, venmo_username: 'sam-lee' }),
@@ -297,7 +344,7 @@ describe('listPeople (D7)', () => {
 
   it.each<[string, unknown]>([
     ['a non-uuid id', [raw('sam', 'Sam')]],
-    ['shared_bills 0', [raw(SAM_ID, 'Sam', { shared_bills: 0 })]],
+    ['shared_bills -1', [raw(SAM_ID, 'Sam', { shared_bills: -1 })]],
     ['shared_bills 1.5', [raw(SAM_ID, 'Sam', { shared_bills: 1.5 })]],
     ['shared_bills "2"', [raw(SAM_ID, 'Sam', { shared_bills: '2' })]],
     ['shared_bills missing', [raw(SAM_ID, 'Sam', { shared_bills: undefined })]],
@@ -306,7 +353,7 @@ describe('listPeople (D7)', () => {
     ['a handle failing VENMO_USERNAME_PATTERN', [raw(SAM_ID, 'Sam', { venmo_username: '@sam' })]],
     ['a too-short handle', [raw(SAM_ID, 'Sam', { venmo_username: 'sam' })]],
     ['a non-string name', [raw(SAM_ID, 42 as unknown as string)]],
-    ['one bad row among good ones', [raw(SAM_ID, 'Sam'), raw(ALI_ID, 'Ali', { shared_bills: 0 })]],
+    ['one bad row among good ones', [raw(SAM_ID, 'Sam'), raw(ALI_ID, 'Ali', { shared_bills: -1 })]],
     ['the same person twice', [raw(SAM_ID, 'Sam'), raw(SAM_ID, 'Sam')]],
     ['a row that is not an object', [null]],
     ['data that is not an array', { user_id: SAM_ID }],

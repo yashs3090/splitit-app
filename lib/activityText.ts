@@ -2,12 +2,14 @@
 // screen. Pure: no I/O, no clock (the caller passes `now`).
 //
 // Safety: every sentence is a fixed template. The only things interpolated are display names
-// (from `nameOf`), item-name snapshots, quantities and `formatCents` amounts. Nothing else from
+// (from `nameOf`), group names (from `groupNameOf`), item-name snapshots, quantities and
+// `formatCents` amounts. Nothing else from
 // `details` is ever shown, so a malformed or unexpected event can't put arbitrary text on screen.
 // Unknown kinds and malformed details return null and the screen skips them.
 
 import { formatCents } from './money';
 import { isSettleCents } from './paylinks';
+import { type PaymentMethod, isPaymentMethod } from './paymentMethods';
 
 export type ActivityEvent = {
   id: string;
@@ -20,6 +22,9 @@ export type ActivityEvent = {
 
 /** "You" for the viewer, the display name, "A friend" if the name is blank, "Someone" for an unknown or null id. */
 export type NameOf = (userId: string | null) => string;
+
+/** A group's current name, or null when the screen doesn't know it (the sentence then says "a group"). */
+export type GroupNameOf = (groupId: string) => string | null;
 
 export type TimeLabel =
   | { kind: 'just_now' }
@@ -34,6 +39,7 @@ export type EventGroup = { label: TimeLabel; events: ActivityEvent[] };
 const SOMEONE = 'Someone';
 const YOU = 'You';
 const A_FRIEND = 'A friend'; // makeNameOf's name for a participant with no display name
+const A_GROUP = 'a group';
 const MAX_PARTS = 20;
 const JUST_NOW_MS = 2 * 60 * 1000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -173,7 +179,15 @@ function safeNamer(nameOf: NameOf): Namer {
 // ---------------------------------------------------------------------------------------------
 // Per-kind sentences. Each returns null when the details are malformed.
 
-type Ctx = { actor: string; actorId: string | null; item: string | null; d: Obj; name: Namer };
+type Ctx = {
+  actor: string;
+  actorId: string | null;
+  item: string | null;
+  d: Obj;
+  name: Namer;
+  /** The group's name for a sentence, "a group" when unknown. */
+  groupName: (groupId: string) => string;
+};
 
 const AMOUNT_FIELDS = [
   ['tax_cents', 'the tax'],
@@ -312,9 +326,111 @@ function payerChangedSentence(c: Ctx): string | null {
   return `${head} and cleared ${cleared} 'I paid' ${cleared === 1 ? 'mark' : 'marks'}`;
 }
 
+// Who paid (spec docs/specs/2026-11-26-who-paid.md, A1.3 event, A1.5 copy, D9; Task 8).
+// payers_changed { before: [{user_id, cents}], after: [{user_id, cents}],
+//                  moved: [{from_user, to_user, cents}], lost?: int }
+// before / after: lead first, as the DB writes them (that order is shown). moved: contract M, every
+// pair whose recipient was a payer before and isn't after. lost: only from an account deletion
+// (actor null), the payments deleted with the person. Ids and cents only are read.
+
+type PayerEntry = { userId: string; cents: number };
+type MovedPayment = { fromId: string; toId: string; cents: number };
+
+/** A non-empty [{user_id, cents ≥ 0}] with no repeated user. */
+function parsePayerList(v: unknown): Parsed<PayerEntry[]> {
+  if (!Array.isArray(v) || v.length === 0) return INVALID;
+  const out: PayerEntry[] = [];
+  const seen = new Set<string>();
+  for (const x of v as unknown[]) {
+    if (!isPlainObject(x) || !isUuid(x.user_id) || !isCount(x.cents, 0) || seen.has(x.user_id)) return INVALID;
+    seen.add(x.user_id);
+    out.push({ userId: x.user_id, cents: x.cents });
+  }
+  return out;
+}
+
+/** [{from_user, to_user, cents ≥ 1}]; each recipient was a payer before and isn't one after (contract M). */
+function parseMoved(v: unknown, before: PayerEntry[], after: PayerEntry[]): Parsed<MovedPayment[]> {
+  if (!Array.isArray(v)) return INVALID;
+  const was = new Set(before.map((p) => p.userId));
+  const is = new Set(after.map((p) => p.userId));
+  const out: MovedPayment[] = [];
+  for (const x of v as unknown[]) {
+    if (!isPlainObject(x) || !isUuid(x.from_user) || !isUuid(x.to_user) || !isCount(x.cents, 1)) return INVALID;
+    if (x.from_user === x.to_user || !was.has(x.to_user) || is.has(x.to_user)) return INVALID;
+    out.push({ fromId: x.from_user, toId: x.to_user, cents: x.cents });
+  }
+  return out;
+}
+
+/**
+ * A1.5: "Hana changed who paid to Dee. Pat's $9.00 to Sam is passed on to Dee." With 2+ moved:
+ * "2 payments to Sam are passed on." Several payers after: "Hana changed who paid: Hana $60.00,
+ * Sam $40.21" (D9), and a moved payment "is passed on" with no single onward person. Actor null
+ * (account deletion): "Who paid went back to Hana", plus "N payments with a deleted account were
+ * removed." when `lost` > 0. A sentence alone has no final period; with a tail, each part ends in one.
+ */
+function payersChangedSentence(c: Ctx): string | null {
+  const before = parsePayerList(c.d.before);
+  const after = parsePayerList(c.d.after);
+  if (before === INVALID || after === INVALID) return null;
+  const moved = parseMoved(c.d.moved, before, after);
+  const lost = c.d.lost;
+  if (moved === INVALID || (lost !== undefined && !isCount(lost, 0))) return null;
+
+  const [only] = after.length === 1 ? after : [];
+  let head: string;
+  if (c.actorId === null) {
+    if (only === undefined) return null; // the reset trigger always goes back to one person, the host
+    head = `Who paid went back to ${targetName(c.name(only.userId))}`;
+  } else if (only === undefined) {
+    head = `${c.actor} changed who paid: ${after.map((p) => `${c.name(p.userId)} ${formatCents(p.cents)}`).join(', ')}`;
+  } else if (only.userId === c.actorId) {
+    head = `${c.actor} changed who paid to ${c.actor === YOU ? 'yourself' : 'themselves'}`;
+  } else {
+    head = `${c.actor} changed who paid to ${targetName(c.name(only.userId))}`;
+  }
+
+  const tails: string[] = [];
+  const onward = only === undefined ? '' : ` to ${targetName(c.name(only.userId))}`;
+  const [first] = moved;
+  if (moved.length === 1 && first !== undefined) {
+    const sender = c.name(first.fromId);
+    const whose = sender === YOU ? 'Your' : `${sender}'s`;
+    tails.push(`${whose} ${formatCents(first.cents)} to ${targetName(c.name(first.toId))} is passed on${onward}.`);
+  } else if (moved.length > 1) {
+    const holders = [...new Set(moved.map((m) => m.toId))].map((id) => targetName(c.name(id)));
+    tails.push(`${moved.length} payments to ${joinList(holders)} are passed on.`);
+  }
+  if (lost !== undefined && lost > 0) {
+    tails.push(lost === 1 ? '1 payment with a deleted account was removed.' : `${lost} payments with a deleted account were removed.`);
+  }
+  return tails.length === 0 ? head : `${head}. ${tails.join(' ')}`;
+}
+
+// Sent via Venmo (spec docs/specs/2026-11-26-sent-via-venmo.md § D6, contract V). A mark's event
+// carries how it was paid. `other`, or no `method` at all (events logged before that slice), keeps
+// the older wording. Anything else is malformed.
+
+/** The event's `method`: absent → null (an older event); a known method; anything else INVALID. */
+function parseMethod(v: unknown): Parsed<PaymentMethod | null> {
+  if (v === undefined) return null;
+  return isPaymentMethod(v) ? v : INVALID;
+}
+
+/** "sent … via Venmo" / "paid … in cash" around the target and amount, or null for the older wording. */
+function methodWords(method: PaymentMethod | null): { verb: string; tail: string } | null {
+  if (method === 'venmo') return { verb: 'sent', tail: ' via Venmo' };
+  if (method === 'cash') return { verb: 'paid', tail: ' in cash' };
+  return null;
+}
+
 function markedPaidSentence(c: Ctx): string | null {
   const { payer_id: payerId, cents } = c.d;
-  if (!isUuid(payerId) || !isSettleCents(cents)) return null;
+  const method = parseMethod(c.d.method);
+  if (!isUuid(payerId) || !isSettleCents(cents) || method === INVALID) return null;
+  const words = methodWords(method);
+  if (words) return `${c.actor} ${words.verb} ${targetName(c.name(payerId))} ${formatCents(cents)}${words.tail}`;
   const they = c.actor === YOU ? 'you' : 'they';
   return `${c.actor} marked that ${they} paid ${objectName(c.name(payerId))} ${formatCents(cents)}`;
 }
@@ -341,16 +457,49 @@ function isMarkOrZero(v: unknown): v is number {
 
 function paidDifferenceSentence(c: Ctx): string | null {
   const { payer_id: payerId, from, to } = c.d;
-  if (!isUuid(payerId) || !isSettleCents(from) || !isSettleCents(to) || to <= from) return null;
+  const method = parseMethod(c.d.method);
+  if (!isUuid(payerId) || !isSettleCents(from) || !isSettleCents(to) || to <= from || method === INVALID) return null;
   if (c.actorId === payerId) return null;
-  return `${c.actor} paid ${targetName(c.name(payerId))} ${formatCents(to - from)} more`;
+  const words = methodWords(method);
+  const amount = `${formatCents(to - from)} more`;
+  if (words) return `${c.actor} ${words.verb} ${targetName(c.name(payerId))} ${amount}${words.tail}`;
+  return `${c.actor} paid ${targetName(c.name(payerId))} ${amount}`;
 }
 
+/**
+ * Sent via Venmo A1 (§11): `paid_back` also names the payer (`payer_id`, the actor) and the mark's
+ * method. Both are optional, for older events; the sentence doesn't change. When `payer_id` is there
+ * it must be a different person from `user_id`, and the actor if the actor is known.
+ */
 function paidBackSentence(c: Ctx): string | null {
   const { user_id: userId, from, to } = c.d;
   if (!isUuid(userId) || !isSettleCents(from) || !isMarkOrZero(to) || to >= from) return null;
   if (c.actorId === userId) return null;
+  if (parseMethod(c.d.method) === INVALID) return null;
+  if (c.d.payer_id !== undefined) {
+    const payerId = c.d.payer_id;
+    if (!isUuid(payerId) || payerId === userId) return null;
+    if (c.actorId !== null && c.actorId !== payerId) return null;
+  }
   return `${c.actor} paid ${targetName(c.name(userId))} back ${formatCents(from - to)}`;
+}
+
+/**
+ * `not_received { user_id, payer_id, cents, method }` (D6): the payer (the actor) cleared
+ * `user_id`'s mark because the money never arrived. The sentence is about the payer named in the
+ * details, so it still reads right if the actor's account is gone (null actor). The method is the
+ * cleared mark's; it's always written, so it's required, and it isn't shown.
+ */
+function notReceivedSentence(c: Ctx): string | null {
+  const { user_id: userId, payer_id: payerId, cents, method } = c.d;
+  if (!isUuid(userId) || !isUuid(payerId) || userId === payerId) return null;
+  if (!isSettleCents(cents) || !isPaymentMethod(method)) return null;
+  if (c.actorId !== null && c.actorId !== payerId) return null;
+  const payer = c.name(payerId);
+  const person = c.name(userId);
+  const whose = person === YOU ? 'your' : `${targetName(person)}'s`;
+  if (payer === YOU) return `You marked ${whose} ${formatCents(cents)} as not received`;
+  return `${payer} hasn't received ${whose} ${formatCents(cents)}`;
 }
 
 // People and invites (spec docs/specs/2026-11-24-people-and-invites.md § D3). Details hold ids only.
@@ -359,6 +508,58 @@ function membershipSentence(c: Ctx, verb: 'added' | 'removed'): string | null {
   const { user_id: userId } = c.d;
   if (!isUuid(userId)) return null;
   return `${c.actor} ${verb} ${targetName(c.name(userId))}`;
+}
+
+// Groups (spec docs/specs/2026-11-26-groups-mvp.md, C-G12 and T5). Details hold ids and counts only.
+
+/**
+ * `assigned` / `unassigned` { user_id, unit? }: a group member set another member's claim on a row
+ * (assign_item). The caller's own change is logged as claimed / unclaimed, so an event about the
+ * actor themself is malformed.
+ */
+function assignSentence(c: Ctx, assigned: boolean): string | null {
+  const { user_id: userId } = c.d;
+  if (c.item === null || !isUuid(userId)) return null;
+  if (c.actorId !== null && c.actorId === userId) return null;
+  const unit = parseUnit(c.d.unit);
+  if (unit === INVALID) return null;
+  const label = `${c.item}${unitSuffix(unit)}`;
+  const who = targetName(c.name(userId));
+  return assigned ? `${c.actor} assigned ${label} to ${who}` : `${c.actor} removed ${who} from ${label}`;
+}
+
+/** `moved_to_group` { group_id, converted }: converted = the 'I paid' marks that became group payments. */
+function movedToGroupSentence(c: Ctx): string | null {
+  const { group_id: groupId, converted } = c.d;
+  if (!isUuid(groupId) || !isCount(converted, 0)) return null;
+  const head = `${c.actor} moved this bill into ${c.groupName(groupId)}`;
+  if (converted === 0) return head;
+  const marks = converted === 1 ? "1 'I paid' mark became a group payment" : `${converted} 'I paid' marks became group payments`;
+  return `${head}. ${marks}.`;
+}
+
+function removedFromGroupSentence(c: Ctx): string | null {
+  const { group_id: groupId } = c.d;
+  if (!isUuid(groupId)) return null;
+  return `${c.actor} took this bill out of ${c.groupName(groupId)}`;
+}
+
+// Control characters and lone surrogates (a group name may hold inner tabs or newlines, GR-T2-9),
+// as cleanNoteName does. Format characters (\p{Cf}) stay: ZWJ joins emoji such as 👨‍👩‍👧 (review R4).
+const UNPRINTABLE = /[\p{Cc}\p{Cs}]/gu;
+
+function safeGroupNamer(groupNameOf: GroupNameOf | undefined): (groupId: string) => string {
+  return (groupId) => {
+    if (groupNameOf === undefined) return A_GROUP;
+    try {
+      const n = groupNameOf(groupId);
+      if (typeof n !== 'string') return A_GROUP;
+      const cleaned = n.replace(UNPRINTABLE, ' ').replace(/\s+/g, ' ').trim();
+      return cleaned === '' ? A_GROUP : cleaned;
+    } catch {
+      return A_GROUP;
+    }
+  };
 }
 
 function sentenceFor(kind: string, c: Ctx): string | null {
@@ -408,6 +609,8 @@ function sentenceFor(kind: string, c: Ctx): string | null {
     }
     case 'payer_changed':
       return payerChangedSentence(c);
+    case 'payers_changed':
+      return payersChangedSentence(c);
     case 'marked_paid':
       return markedPaidSentence(c);
     case 'unmarked_paid':
@@ -416,25 +619,45 @@ function sentenceFor(kind: string, c: Ctx): string | null {
       return paidDifferenceSentence(c);
     case 'paid_back':
       return paidBackSentence(c);
+    case 'not_received':
+      return notReceivedSentence(c);
     case 'participant_added':
       return membershipSentence(c, 'added');
     case 'participant_removed':
       return membershipSentence(c, 'removed');
     case 'left':
       return `${actor} left`;
+    case 'assigned':
+      return assignSentence(c, true);
+    case 'unassigned':
+      return assignSentence(c, false);
+    case 'moved_to_group':
+      return movedToGroupSentence(c);
+    case 'removed_from_group':
+      return removedFromGroupSentence(c);
     default:
       return null;
   }
 }
 
-/** One plain sentence, or null if the kind is unknown or details are malformed (the screen skips it). Never throws. */
-export function describeEvent(e: ActivityEvent, nameOf: NameOf): string | null {
+/**
+ * One plain sentence, or null if the kind is unknown or details are malformed (the screen skips it).
+ * `groupNameOf` names the group in moved_to_group / removed_from_group ("a group" without it). Never throws.
+ */
+export function describeEvent(e: ActivityEvent, nameOf: NameOf, groupNameOf?: GroupNameOf): string | null {
   try {
     if (!isPlainObject(e) || typeof e.kind !== 'string' || !isPlainObject(e.details)) return null;
     const actorId = typeof e.actorId === 'string' ? e.actorId : null;
     if (e.actorId !== null && actorId === null) return null; // actorId of the wrong type
     const name = safeNamer(nameOf);
-    return sentenceFor(e.kind, { actor: name(actorId), actorId, item: itemLabel(e.itemName), d: e.details, name });
+    return sentenceFor(e.kind, {
+      actor: name(actorId),
+      actorId,
+      item: itemLabel(e.itemName),
+      d: e.details,
+      name,
+      groupName: safeGroupNamer(groupNameOf),
+    });
   } catch {
     return null;
   }

@@ -19,7 +19,8 @@ jest.mock('@/lib/storage', () => {
 
 const supabase = realSupabase as unknown as FakeSupabase;
 /** Every rpc call except the bill screen's fire-and-forget mark_bill_seen (bill markers D6), which runs once per open. */
-const rpcCallsExceptSeen = () => supabase.rpc.mock.calls.filter(([fn]) => fn !== 'mark_bill_seen');
+// Also not the host's one my_groups read (groups GR-T17-12: "Move to a group"), which writes nothing.
+const rpcCallsExceptSeen = () => supabase.rpc.mock.calls.filter(([fn]) => fn !== 'mark_bill_seen' && fn !== 'my_groups');
 const ROUTES = './app';
 
 const BILL = '11111111-1111-4111-8111-111111111111';
@@ -68,6 +69,7 @@ function reset(mode: 'proportional' | 'equal' = 'proportional') {
     total_discount_cents: 0,
     total_cents: 4480,
     join_code: '0123456789abcdef0123',
+    group_id: null, // bills.group_id: fetchBillGroup reads it (a bill in no group)
     created_at: '2026-11-20T19:00:00Z',
     edited_at: null,
     extras_split: mode,

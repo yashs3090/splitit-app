@@ -1,9 +1,12 @@
 // Screen copy and "On this bill" rows for the People card and the Add people screen.
 // Spec: docs/specs/2026-11-24-people-and-invites.md (D6; Tasks 6 and 7).
+import { fakeMark, fakePayment } from '@/test-utils/fakes';
+
 import { makeNameOf } from './billView';
 import type { BillData, BillMember } from './bills';
 import {
   addedText,
+  leaveBlockedText,
   noMatchesText,
   onlyHostText,
   onThisBillRows,
@@ -23,15 +26,27 @@ const member = (userId: string, displayName: string | null, mark: BillMember['ma
   displayName,
   venmoUsername: null,
   mark,
+  notReceived: null,
 });
 
-function bill(participants: BillMember[], claims: { line_item_id: string; user_id: string; parts: number }[] = [], payerId = HOST): BillData {
+function bill(
+  participants: BillMember[],
+  claims: { line_item_id: string; user_id: string; parts: number }[] = [],
+  payerId = HOST,
+  payers: BillData['payers'] = [],
+): BillData {
   // Test double: only the fields these helpers read are meaningful.
   return {
     bill: { id: 'b', host_id: HOST, payer_id: payerId } as unknown as BillData['bill'],
     rows: [],
     participants,
     claims,
+    // Who paid A1.4: L3 reads the ledger. Each hand-built mark becomes the entry 4a's copy would make.
+    payers,
+    payments: participants.flatMap((p) =>
+      p.mark ? [fakePayment(p.userId, p.userId, p.mark.toUserId, p.mark.cents, p.mark.at, p.mark.method)] : [],
+    ),
+    flags: [],
   };
 }
 
@@ -98,7 +113,7 @@ describe('onThisBillRows', () => {
         member(HOST, 'Hana'),
         member(SAM, 'Sam'),
         member(CY, 'Cy'),
-        member(DEE, 'Dee', { cents: 100, at: '2026-11-20T19:00:00Z' }),
+        member(DEE, 'Dee', fakeMark(100, '2026-11-20T19:00:00Z', HOST)),
         member('00000000-0000-4000-8000-00000000000e', 'Eve'),
       ],
       [{ line_item_id: ROW, user_id: CY, parts: 1 }],
@@ -125,5 +140,69 @@ describe('onThisBillRows', () => {
     const data = bill([member(HOST, 'Hana'), member(SAM, null)]);
     const rows = onThisBillRows(data, HOST, makeNameOf(data.participants, HOST));
     expect(rows[1]?.name).toBe('A friend');
+  });
+});
+
+// Who paid S12 (docs/specs/2026-11-26-who-paid.md A1.5): a payer can't be removed and can't leave,
+// and the reason shows before any tap.
+describe('payers: the reason Remove and Leave are missing (S12)', () => {
+  const split = (lead: string, other: string) => [
+    { userId: lead, paidCents: 6000 },
+    { userId: other, paidCents: 4021 },
+  ];
+
+  it('host view: a co-payer gets the spec line instead of Remove, and the label says it', () => {
+    const data = bill([member(HOST, 'Hana'), member(SAM, 'Sam'), member(CY, 'Cy')], [], HOST, split(HOST, SAM));
+    const rows = onThisBillRows(data, HOST, makeNameOf(data.participants, HOST));
+    expect(rows.map((r) => [r.name, r.removable, r.payerNote, r.a11yLabel])).toEqual([
+      ['You', false, null, 'You, no items yet'],
+      ['Sam', false, 'Sam paid part of the bill. Change who paid first.', 'Sam, no items yet. Sam paid part of the bill. Change who paid first.'],
+      ['Cy', true, null, 'Cy, no items yet'],
+    ]);
+  });
+
+  it('host view: the one payer (not the host) gets the one-person line; a payer with claims still gets it', () => {
+    const data = bill([member(HOST, 'Hana'), member(SAM, 'Sam')], [{ line_item_id: ROW, user_id: SAM, parts: 1 }], SAM);
+    const row = onThisBillRows(data, HOST, makeNameOf(data.participants, HOST))[1];
+    expect(row).toMatchObject({ removable: false, payerNote: 'Sam paid the bill. Change who paid first.', a11yLabel: 'Sam. Sam paid the bill. Change who paid first.' });
+  });
+
+  it('the host, as a payer, never gets a note (the host is never removable anyway)', () => {
+    const data = bill([member(HOST, 'Hana'), member(SAM, 'Sam')], [], SAM, split(SAM, HOST));
+    const rows = onThisBillRows(data, HOST, makeNameOf(data.participants, HOST));
+    expect(rows[0]).toMatchObject({ name: 'You', payerNote: null });
+    expect(rows[1]?.payerNote).toBe('Sam paid part of the bill. Change who paid first.');
+  });
+
+  it('a guest viewer gets no notes (only the host removes)', () => {
+    const data = bill([member(HOST, 'Hana'), member(SAM, 'Sam'), member(CY, 'Cy')], [], HOST, split(HOST, CY));
+    const rows = onThisBillRows(data, SAM, makeNameOf(data.participants, SAM));
+    expect(rows.map((r) => r.payerNote)).toEqual([null, null, null]);
+  });
+
+  it('leaveBlockedText: a co-payer gets the spec line, naming the host', () => {
+    const data = bill([member(HOST, 'Hana'), member(SAM, 'Sam')], [], HOST, split(HOST, SAM));
+    expect(leaveBlockedText(data, SAM)).toBe(
+      "You're one of the people who paid. Ask Hana to change who paid before you leave.",
+    );
+  });
+
+  it('leaveBlockedText: the one payer gets the one-person line', () => {
+    const data = bill([member(HOST, 'Hana'), member(SAM, 'Sam')], [], SAM);
+    expect(leaveBlockedText(data, SAM)).toBe('You paid the bill. Ask Hana to change who paid before you leave.');
+  });
+
+  it('leaveBlockedText: null for a non-payer, for the host, and for someone not on the bill', () => {
+    const data = bill([member(HOST, 'Hana'), member(SAM, 'Sam'), member(CY, 'Cy')], [], HOST, split(HOST, SAM));
+    expect(leaveBlockedText(data, CY)).toBeNull();
+    expect(leaveBlockedText(data, HOST)).toBeNull();
+    expect(leaveBlockedText(data, DEE)).toBeNull();
+  });
+
+  it('a host with no name reads "the host"', () => {
+    const data = bill([member(HOST, null), member(SAM, 'Sam')], [], HOST, split(HOST, SAM));
+    expect(leaveBlockedText(data, SAM)).toBe(
+      "You're one of the people who paid. Ask the host to change who paid before you leave.",
+    );
   });
 });

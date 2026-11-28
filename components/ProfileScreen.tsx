@@ -1,7 +1,13 @@
-// Profile: your name, your Venmo username (so friends can pay you), the people you've split with, and sign out.
+// Profile: your name, your Venmo username (so friends can pay you), Appearance (Auto / Light / Dark, on
+// this device), the people you've split with, and sign out.
 // Spec: docs/specs/2026-11-24-profile-venmo.md (Task 4, criteria 27–30); the People card is
 // docs/specs/2026-11-24-people-and-invites.md (D6, Task 6, criteria 38–41).
 // This screen never navigates after sign-in; app/_layout.tsx's resume effect is the only one that does (D4).
+//
+// Shown in two places (docs/specs/2026-11-28-tab-bar-and-activity.md Task 5, criterion 41):
+// - the Profile tab (app/(app)/(tabs)/profile.tsx, route /profile): no back control, the tab bar leads away;
+// - /account (app/(app)/account.tsx), pushed above the tabs from Settle's and VenmoPrompt's Venmo links,
+//   with a Back that returns to the screen the person came from (a tab can't sit above Settle).
 import { useRouter } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AccessibilityInfo, ActivityIndicator, Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
@@ -12,8 +18,10 @@ import { BackHeader } from '@/components/ui/BackHeader';
 import { Banner, BannerText } from '@/components/ui/Banner';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
+import { SegmentedControl } from '@/components/ui/SegmentedControl';
 import { StatusLine } from '@/components/ui/StatusLine';
 import { TextField } from '@/components/ui/TextField';
+import { TextLink } from '@/components/ui/TextLink';
 import { defaultTimeFormatters } from '@/lib/activityText';
 import { useSession } from '@/lib/auth';
 import { displayNameFor } from '@/lib/displayName';
@@ -21,7 +29,10 @@ import { PEOPLE_COPY } from '@/lib/peopleView';
 import { getMyProfile, SAVE_VENMO_ERROR_COPY, saveVenmoUsername } from '@/lib/profile';
 import { signOutThisDevice } from '@/lib/signOut';
 import { layout, space, type, useTheme } from '@/lib/theme';
+import { APPEARANCE_COPY, setThemePreference, THEME_PREFERENCE_OPTIONS, useThemePreference } from '@/lib/themePreference';
 import { usePeople } from '@/lib/usePeople';
+import { atUsername, USERNAME_GATE_COPY } from '@/lib/username';
+import { useUsernameStatus } from '@/lib/useUsernameStatus';
 import { normalizeVenmoUsername, VENMO_USERNAME_ERROR } from '@/lib/venmo';
 
 const LOAD_ERROR = "Couldn't load your profile.";
@@ -37,12 +48,15 @@ type Load =
       venmoUsername: string | null;
     };
 
-export default function ProfileScreen() {
+/** `withBack`: the /account copy, with a Back header; the Profile tab has none. */
+export function ProfileScreen({ withBack }: { withBack: boolean }) {
   const { session } = useSession();
   const router = useRouter();
   const { colors } = useTheme();
   const insets = useSafeAreaInsets();
   const userId = session?.user.id ?? '';
+  // The same kept answer the (app) layout's username gate read: no read of its own.
+  const username = useUsernameStatus(session?.user.id ?? null);
 
   const [load, setLoad] = useState<Load>({ status: 'loading' });
   const [input, setInput] = useState('');
@@ -144,18 +158,26 @@ export default function ProfileScreen() {
 
   return (
     <>
-      <BackHeader
-        title="Profile"
-        back={{
-          label: 'Back',
-          accessibilityLabel: 'Back',
-          accessibilityHint: router.canGoBack() ? 'Goes back' : 'Goes to Home',
-          onPress: onBack,
-        }}
-      />
+      {withBack ? (
+        <BackHeader
+          title="Profile"
+          back={{
+            label: 'Back',
+            accessibilityLabel: 'Back',
+            accessibilityHint: router.canGoBack() ? 'Goes back' : 'Goes to Home',
+            onPress: onBack,
+          }}
+        />
+      ) : null}
       <ScrollView
         style={{ backgroundColor: colors.background }}
-        contentContainerStyle={[styles.content, { paddingTop: space.md, paddingBottom: insets.bottom + space.xl }]}
+        contentContainerStyle={[
+          styles.content,
+          // The tab has no header, so the top safe area is ours; the tab bar covers the bottom one.
+          withBack
+            ? { paddingTop: space.md, paddingBottom: insets.bottom + space.xl }
+            : { paddingTop: insets.top + space.lg, paddingBottom: space.xl },
+        ]}
         keyboardShouldPersistTaps="handled"
         automaticallyAdjustKeyboardInsets
       >
@@ -169,6 +191,26 @@ export default function ProfileScreen() {
               <Text style={[type.body, { color: colors.textMuted }]}>
                 {load.displayName ?? displayNameFor(session?.user)}
               </Text>
+            ) : null}
+            {username.status === 'ready' ? (
+              // Usernames A3.9: read-only once picked. While still provisional (the layout's gate normally
+              // covers that), "Choose" reads the status again, which brings the gate up.
+              <View style={styles.usernameLine}>
+                <Text
+                  accessibilityLabel={USERNAME_GATE_COPY.profileRow(username.username)}
+                  style={[type.body, styles.usernameText, { color: colors.textMuted }]}
+                >
+                  {atUsername(username.username)}
+                </Text>
+                {!username.locked ? (
+                  <TextLink
+                    label={USERNAME_GATE_COPY.choose}
+                    accessibilityLabel={USERNAME_GATE_COPY.chooseLabel}
+                    accessibilityHint={USERNAME_GATE_COPY.chooseHint}
+                    onPress={username.retry}
+                  />
+                ) : null}
+              </View>
             ) : null}
           </View>
 
@@ -226,6 +268,9 @@ export default function ProfileScreen() {
             </Card>
           )}
 
+          {/* With the Venmo card: the two settings sit together. Device-local, so it shows whatever the profile load is doing. */}
+          <AppearanceCard />
+
           <PeopleCard userId={userId} />
 
           {/* BILL HISTORY (v1): past bills go here, between the Venmo section and Sign out. Not built yet; no placeholder. */}
@@ -249,6 +294,25 @@ export default function ProfileScreen() {
         </View>
       </ScrollView>
     </>
+  );
+}
+
+/** Auto / Light / Dark. Applies at once and is saved on this device (lib/themePreference.ts); no Save button. */
+function AppearanceCard() {
+  const { colors } = useTheme();
+  const pref = useThemePreference();
+  return (
+    <Card title={APPEARANCE_COPY.label}>
+      <SegmentedControl
+        options={THEME_PREFERENCE_OPTIONS}
+        value={pref}
+        onChange={(next) => void setThemePreference(next)}
+        semantics="radio"
+        groupLabel={APPEARANCE_COPY.label}
+        stretch
+      />
+      <Text style={[type.caption, { color: colors.textMuted }]}>{APPEARANCE_COPY.hint}</Text>
+    </Card>
   );
 }
 
@@ -283,6 +347,8 @@ const styles = StyleSheet.create({
   content: { flexGrow: 1, paddingHorizontal: layout.screenPadding },
   column: { width: '100%', maxWidth: layout.content, alignSelf: 'center', gap: space.xl },
   header: { gap: space.xs },
+  usernameLine: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', columnGap: space.sm },
+  usernameText: { flexShrink: 1 },
   spinner: { alignSelf: 'flex-start' },
   // Sign out sits apart from everything above it: 24 (section gap) + 8 = 32.
   footer: { gap: space.md, marginTop: space.sm },

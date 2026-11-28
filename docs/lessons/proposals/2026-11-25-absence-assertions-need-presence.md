@@ -14,6 +14,8 @@
 - 2026-11-24 "Spec said a grep 'matches nothing today', but it matched" [testing]
 - 2026-11-25 "'Verify' marks on library facts paid off; bundle markers must be counted in the real file" [testing]
 - 2026-11-25 "An npm hook wiped `public/opencv/` while the harness was reading it" [testing]
+- 2026-11-26 "Absence check without a positive control, eleventh time…" and "Guard tests that couldn't fail on React 19…" [testing] (added in the home-mobile-refresh retro; see Changes 6 and 7)
+- 2026-11-27 "Absence check without a positive control, thirteenth time: hidden, but back in another form" [testing] (added in the Home groups v2 retro; see Change 8)
 
 ## Change 1: `.claude/agents/implementer.md`, How to work, new bullet directly before the "Follow the conventions in `CLAUDE.md`" bullet
 
@@ -80,5 +82,64 @@ New (inserted directly after it):
 - `now()` returns the same time for the whole test transaction, so an "unchanged" check on a timestamp (`settled_at`, `updated_at`) first sets it to a known past value, so a wrongful rewrite would show up. Every new "unchanged" or "nothing written" assertion is run once against a deliberately broken version of the function (then reverted) to show it can fail; say so in your report.
 ```
 
+## Change 6 (added 2026-11-26, home-mobile-refresh retro): wait for the new data, not just the region
+
+Evidence: log 2026-11-26 "Absence check without a positive control, eleventh time, and assertions that ran before the data landed" [testing]. Review R1 (should-fix) of docs/specs/2026-11-26-home-mobile-refresh.md, criterion 38: "Your share" absent for an `early` plan passed before the plan loaded, because a row with no plan already shows "Total". R3: an assertion ran before the refresh's list landed. The reviewer called it "about the 10th time". This proposal has been pending since 2026-11-25, and the lesson keeps coming back because no agent file has it yet. It is the most repeated unapplied lesson in the log, so it's the one most worth approving.
+
+Apply after Changes 1, 2 and 4; each adds one sentence to the text those changes insert.
+
+6a. In the bullet Change 1 inserts into `implementer.md`, after "An absence check that can't see the region passes no matter what.", add:
+```
+When the screen loads or refreshes data, first wait for a marker that only the new data produces (the early plan's "Total" amount, a row only the refreshed list has), then assert. A region rendered from the old data counts as not seen.
+```
+
+6b. At the end of the bullet Change 2 inserts into `product-engineer.md`, add:
+```
+With async data, first wait for a marker that only the new data produces, then assert.
+```
+
+6c. In the phrase Change 4 puts into `code-reviewer.md`, after "(a "not shown" check run with the section collapsed passes no matter what)", add:
+```
+, or one that runs before the data it's about has loaded
+```
+
+## Change 7 (added 2026-11-26, home-mobile-refresh retro): guard tests are shown to fail
+
+Evidence: log 2026-11-26 "Guard tests that couldn't fail on React 19, and a state tested only through another state's path" [testing]. R2: an "answer after unmount sets no state" test couldn't fail on React 19 (no warning, and the focus cleanup already bumps `latest`); the replacement tests hold a read open while Profile is open and were proven to fail with the guards removed. R4: D6's pending state was only tested through the failure path. Same family as Change 5 (pgTAP checks proven against a broken function).
+
+7a. `.claude/agents/implementer.md`, How to work: insert directly after the bullet Change 1 inserts:
+```
+- A test for a guard (a stale response, an answer after unmount or after leaving the screen) holds the request open with a deferred promise, causes the situation, then resolves the promise and checks what's on screen. Don't rely on React warnings; React 19 doesn't warn about state set after unmount. Run the test once with the guard removed to show it fails, put the guard back, and say so in your report. Each state the spec lists (pending, failed, done) gets its own test.
+```
+
+7b. `.claude/agents/product-engineer.md`, § Build: insert directly after the bullet Change 2 inserts:
+```
+- Guard tests (stale response, after unmount) hold the request open with a deferred promise and are run once with the guard removed to show they fail. Each listed state (pending, failed, done) gets its own test.
+```
+
+7c. `.claude/agents/code-reviewer.md`, item 4, after the text Change 4 (and 6c) adds, before the sentence "For navigation and auth flows":
+```
+ Flag a guard test that would pass with the guard removed (for example one that relies on a React warning, or on another guard that covers the same path), and a listed state that's only tested through another state's path.
+```
+
+## Change 8 (added 2026-11-27, Home groups v2 retro): "hidden" is proved by the full list, not by one form being absent
+
+Evidence: log 2026-11-27 "Absence check without a positive control, thirteenth time: hidden, but back in another form" [testing]. Review R5 of docs/specs/2026-11-26-home-groups-v2.md: `S2_HIDDEN` in `__tests__/homeMarkers.test.tsx` checked that S2's paid label and "Paid $14.80" were absent. If S2 had come back as its no-plan label, the check would still have passed. The fix compares the full list of row labels with the expected list. **This is the thirteenth occurrence, and all of them came after this proposal was written on 2026-11-25. It's the most repeated unapplied lesson in the log.** If only part can be approved, approve Changes 1, 2 and 4.
+
+8a. In the bullet Change 1 inserts into `implementer.md`, after the sentence Change 6a adds, add:
+```
+To show that something is hidden from a list, assert the exact full list that is shown (every row label, in order), not the absence of one form of the hidden item. A row can render in several forms (with or without a plan, with or without a pill).
+```
+
+8b. At the end of the bullet Change 2 inserts into `product-engineer.md` (after 6b), add:
+```
+"Hidden from the list" is asserted as the exact list shown, not as one label being absent.
+```
+
+8c. In the text Change 4 puts into `code-reviewer.md` (after 6c's addition), add:
+```
+, or a "hidden" check that looks for one form of the item instead of comparing the full list shown
+```
+
 ## What this changes for you
-Tests that say "this is gone" will prove they were looking in the right place, so leftovers like the ▴/▾ arrows get caught by the test suite instead of by a reviewer reading the screen.
+Tests that say "this is gone" will prove they were looking in the right place, so leftovers like the ▴/▾ arrows get caught by the test suite instead of by a reviewer reading the screen. Tests that wait for data will wait for the new data, and tests for "ignore a late answer" guards will be shown to fail when the guard is missing.

@@ -13,6 +13,9 @@
 - 2026-11-21, 2026-11-22, 2026-11-24 (twice) and 2026-11-24 "Root `.env` Google variables, fifth report" [expo]
 - 2026-11-24 "QA's own dev server worked; shell values override the root `.env`" [testing]
 - 2026-11-24 "Root `.env` Google variables, sixth report" and 2026-11-25 "Root `.env` Google variables, seventh report" [expo] (added in later retros): still reported in full each time; Change 5 would make it one line.
+- 2026-11-26 "Root `.env` Google variables, eighth report" [expo] (added in the home-mobile-refresh retro). Separately, the expected-`cdn.jsdelivr.net` sentence that Change 2 keeps is reworded by `2026-11-26-claude-md-leak-check-two-jsdelivr-matches.md`; the two apply in either order.
+- 2026-11-27 "Root `.env` Google variables, ninth report" [expo] (added in the Sent-via-Venmo retro): reported again in full. Change 5 alone would turn this into one line per report and can be approved on its own.
+- 2026-11-28 "Root `.env` Google variables, tenth report" [expo] (added in the usernames retro): reported again.
 
 ## Change 1: `CLAUDE.md` § Commands, Tests bullet
 
@@ -25,6 +28,14 @@ New:
 ```
 Shared test fakes are in `test-utils/`. `test-utils/jestSetup.ts` runs before every test file and holds stand-ins for native modules that throw under Jest (`expo-contacts`, `expo-sms`). A new native module that screens import gets a stand-in there, and it rejects ("<module> not mocked in this test") instead of returning a quiet default.
 ```
+
+**Change 1, reworded (added 2026-11-28, tab-bar-and-Activity retro).** Apply this text instead of Change 1's "New" above.
+
+Evidence: log 2026-11-28 "Other sessions' changes broke our tests three times, one as a hang under Jest" [testing] and "A background test loop hung for over 2 hours…" [testing]. Another session's `<StatusBar>` from `expo-status-bar` in `app/_layout.tsx` left native async work pending under Jest. `__tests__/activity.test.tsx` hung instead of throwing, which took a bisection to find. The fix is a stand-in in `test-utils/jestSetup.ts` that records calls (`(StatusBar as jest.Mock).mock.calls`). A module that hangs needs a stand-in as much as one that throws, and a layout every screen mounts is where it matters most.
+```
+Shared test fakes are in `test-utils/`. `test-utils/jestSetup.ts` runs before every test file and holds stand-ins for native modules that throw or hang under Jest (`expo-contacts`, `expo-sms`, `expo-status-bar`). A native module that screens or a root layout (`app/_layout.tsx`, `app/(app)/_layout.tsx`) render gets a stand-in there in the same change. It rejects ("<module> not mocked in this test") instead of returning a quiet default, unless it only renders or sets display state, where a `jest.fn()` returning null is the safe answer.
+```
+(`2026-11-28-foreground-test-runs-with-limits.md` adds a sentence at the end of the same bullet; the two apply in either order.)
 
 ## Change 2: `CLAUDE.md` § Commands, end of the Web build bullet
 

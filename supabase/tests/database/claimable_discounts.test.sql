@@ -456,7 +456,7 @@ set local request.jwt.claims = '{"sub":"cd200000-0000-0000-0000-000000000002","r
 select public.set_claim(current_setting('test.m_salad')::uuid, true);
 set local request.jwt.claims = '{"sub":"cd100000-0000-0000-0000-000000000001","role":"authenticated"}';
 select lives_ok(
-  format($$ select public.mark_paid(%L::uuid, 'cd200000-0000-0000-0000-000000000002'::uuid, 128) $$,
+  format($$ select public.mark_paid(%L::uuid, 'cd200000-0000-0000-0000-000000000002'::uuid, 128, 'other') $$,
     current_setting('test.m_id')),
   'c11 K-D2: every row (items and the discount) claimed: mark_paid succeeds');
 reset role;

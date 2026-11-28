@@ -3,17 +3,33 @@
   <head>
     <meta charset="utf-8" />
     <meta httpEquiv="X-UA-Compatible" content="IE=edge" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+    <!-- viewport-fit=cover turns on env(safe-area-inset-*), which the app's safe-area insets read on
+         notched phones. Never turn pinch-zoom off here; inputs are 16px on web so the page doesn't zoom into them. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no, viewport-fit=cover" />
     <!-- Light and dark: the browser draws its own scrollbars, form controls and overscroll to match. -->
     <meta name="color-scheme" content="light dark" />
     <title>%WEB_TITLE%</title>
+    <!-- Browser toolbar / status bar tint, matching the page background in each scheme. -->
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#F3F4F6" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0B0F14" />
+    <!-- Add to Home Screen: name, icons (placeholders for now, same file names when replaced). -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-title" content="SplitIt" />
     <!--
       SplitIt's copy of Expo's SPA template (web.output "single" uses public/index.html when it
-      exists; app/+html.tsx only applies to static output). The only additions are the color-scheme
-      meta above and the page background below, so the first paint, the browser's overscroll and
-      its toolbar tint match the app instead of flashing white in dark mode.
-      The two colors are colors.light.background and colors.dark.background in lib/theme.ts;
-      __tests__/webTemplate.test.ts fails if they drift.
+      exists; app/+html.tsx only applies to static output). SplitIt's additions:
+      - the color-scheme meta and the page background (splitit-background), so the first paint, the
+        browser's overscroll and its toolbar tint match the app instead of flashing white in dark mode;
+      - viewport-fit=cover on the viewport meta, so safe-area insets work on notched phones;
+      - two theme-color metas (light and dark);
+      - the web app manifest (/manifest.webmanifest, display "browser"), the apple-touch-icon and the
+        home-screen title;
+      - no tap-highlight flash (splitit-touch; react-native-web sets the same rule once JS runs);
+      - the Appearance script (splitit-appearance): a Light or Dark choice stored on this device wins
+        over prefers-color-scheme for the background, theme-color and color-scheme before JS loads.
+      The colors are colors.light.background and colors.dark.background in lib/theme.ts;
+      __tests__/webTemplate.test.ts fails if they drift (here or in public/manifest.webmanifest).
     -->
     <!-- The `react-native-web` recommended style reset: https://necolas.github.io/react-native-web/docs/setup/#root-element -->
     <style id="expo-reset">
@@ -43,6 +59,41 @@
         body {
           background-color: #0B0F14;
         }
+      }
+      /* Appearance set to Light or Dark on this device (data-appearance, set by splitit-appearance below
+         and by the app): wins over prefers-color-scheme. */
+      html[data-appearance="light"],
+      html[data-appearance="light"] body {
+        background-color: #F3F4F6;
+      }
+      html[data-appearance="dark"],
+      html[data-appearance="dark"] body {
+        background-color: #0B0F14;
+      }
+    </style>
+    <!-- Appearance (Auto / Light / Dark), before the bundle loads so the first paint is already right.
+         Mirrors applyWebAppearance in lib/themePreference.ts; __tests__/webTemplate.test.ts runs both
+         and checks they agree. Auto (or nothing stored, or storage blocked) leaves the page as is. -->
+    <script id="splitit-appearance">
+      (function () {
+        try {
+          var p = localStorage.getItem('splitit.appearance');
+          if (p !== 'light' && p !== 'dark') return;
+          var bg = p === 'dark' ? '#0B0F14' : '#F3F4F6';
+          var root = document.documentElement;
+          root.setAttribute('data-appearance', p);
+          root.style.colorScheme = p;
+          var metas = document.querySelectorAll('meta[name="color-scheme"]');
+          for (var i = 0; i < metas.length; i++) metas[i].setAttribute('content', p);
+          var tints = document.querySelectorAll('meta[name="theme-color"]');
+          for (var j = 0; j < tints.length; j++) tints[j].setAttribute('content', bg);
+        } catch (e) {}
+      })();
+    </script>
+    <style id="splitit-touch">
+      /* No gray flash over tapped elements on iOS Safari / Android Chrome; buttons draw their own press state. */
+      html {
+        -webkit-tap-highlight-color: transparent;
       }
     </style>
   </head>

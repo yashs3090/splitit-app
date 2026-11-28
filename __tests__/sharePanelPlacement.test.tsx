@@ -62,6 +62,7 @@ function installTables() {
       total_discount_cents: 0,
       total_cents: 2100,
       join_code: '0123456789abcdef0123',
+      group_id: null, // bills.group_id: fetchBillGroup reads it (a bill in no group)
       created_at: '2026-11-20T19:00:00Z',
       edited_at: null,
       extras_split: 'proportional',

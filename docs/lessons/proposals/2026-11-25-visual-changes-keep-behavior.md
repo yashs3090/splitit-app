@@ -84,5 +84,20 @@ New:
 - Don't commit or push. Don't run Prettier, `eslint --fix` or codemods over files (there's no project formatter config, and untracked files can't be restored); edit only the lines the task changes.
 ```
 
+## Change 6 (added 2026-11-27, group claim status retro; can be approved on its own): a person's own action doesn't move what they're acting on
+
+Evidence: log 2026-11-27 "An opt-out moved the row the person had just tapped, and focus went with it" [expo] (review R4 of docs/specs/2026-11-27-group-claim-status.md, fixed with `keepOrder`), and 2026-11-25 "A layout change remounted SharePanel and threw away what the host had typed" [expo]. This is the second time new data moved, or remounted, the thing the person was using. Changes 1(2) and 4 cover remounts after visual changes only, and this one came from a data change in a feature.
+
+**6a. `.claude/agents/product-engineer.md`, § Build: append to the Change 3 bullet (after "Moving a screen to a native header or sheet adds these paths.")**
+```
+When a person's own action changes the data that orders or places a list row or block (an opt-out that re-sorts, a join that moves a panel), the row keeps its place and focus until a later refresh they didn't cause (focus, pull-to-refresh), and a stateful block keeps its identity. Test by acting on the row and checking its position and focus right after.
+```
+
+**6b. `.claude/agents/code-reviewer.md`, item 3: append to the Change 4 sentences**
+```
+Flag a list that re-sorts under the row the person just acted on.
+```
+Evidence for Changes 2 and 5 (added the same day): log 2026-11-27 "Five sessions shared the bill screen and its tests without clobbering" [process]. An agent tried a scripted whole-file rewrite (with an added `eslint-disable` comment). The permission check denied it, and the agent redid the change as exact edits. This is the second whole-file rewrite by an agent, after the 2026-11-25 Prettier run.
+
 ## What this changes for you
 Restyles stop costing screen-reader users their headings, a block that moves on screen keeps whatever someone had typed in it, and switching to native back buttons and sheets can't open a new way to lose an unsaved bill or split without someone noticing. Agents also stop reformatting whole files you haven't committed yet.

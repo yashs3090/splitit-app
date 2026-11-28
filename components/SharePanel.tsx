@@ -4,16 +4,16 @@
 // "Add people" (host only, shown when `onAddPeople` is set): docs/specs/2026-11-24-people-and-invites.md (D6, Task 7).
 // Any participant can share; only the host can replace the link, after an inline confirmation
 // (React Native Web has no Alert dialog, so the confirmation is part of the panel on every platform).
-// "Show QR code" (every participant) folds out a QR of the same link under the buttons
-// (components/InviteQr.tsx; docs/decisions-to-review.md "Invite QR").
+// "Show QR code" (every participant) opens a popup with a large QR of the same link
+// (components/QrSheet.tsx; docs/decisions-to-review.md "Invite QR", "QR popup").
 import * as Clipboard from 'expo-clipboard';
 import Plus from 'lucide-react-native/icons/plus';
 import QrCode from 'lucide-react-native/icons/qr-code';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { Platform, Share, StyleSheet, Text, View } from 'react-native';
 
 import { ContactInvite } from '@/components/ContactInvite';
-import { INVITE_QR_COPY, InviteQr } from '@/components/InviteQr';
+import { QrSheet } from '@/components/QrSheet';
 import { Banner, BannerText } from '@/components/ui/Banner';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -21,6 +21,7 @@ import { StatusLine } from '@/components/ui/StatusLine';
 import { TextLink } from '@/components/ui/TextLink';
 import { inviteMessage } from '@/lib/contactInvite';
 import { contactsSupported } from '@/lib/contactPicker';
+import { INVITE_QR_COPY, qrSheetTitle } from '@/lib/inviteQr';
 import { PEOPLE_COPY } from '@/lib/peopleView';
 import { radius, space, type, useTheme } from '@/lib/theme';
 
@@ -51,8 +52,9 @@ export function SharePanel({ url, isHost, onRotate, onAddPeople }: Props) {
   const [confirming, setConfirming] = useState(false);
   const [rotating, setRotating] = useState(false);
   const [rotateFailed, setRotateFailed] = useState(false);
-  // Folded by default (opt-in, like the other quiet extras); stays open across a new link, which redraws it.
+  // The QR popup; a new link while it's open redraws it.
   const [showQr, setShowQr] = useState(false);
+  const qrTrigger = useRef<View>(null);
   // A copied-link note belongs to the link it was about.
   const [copiedUrl, setCopiedUrl] = useState(url);
   const copyState = copiedUrl === url ? copy : 'idle';
@@ -130,13 +132,19 @@ export function SharePanel({ url, isHost, onRotate, onAddPeople }: Props) {
       ) : null}
 
       <TextLink
-        label={showQr ? INVITE_QR_COPY.hide : INVITE_QR_COPY.show}
-        accessibilityHint={showQr ? undefined : INVITE_QR_COPY.showHint}
-        accessibilityState={{ expanded: showQr }}
+        ref={qrTrigger}
+        label={INVITE_QR_COPY.show}
+        accessibilityHint={INVITE_QR_COPY.showHint}
         icon={QrCode}
-        onPress={() => setShowQr((v) => !v)}
+        onPress={() => setShowQr(true)}
       />
-      {showQr ? <InviteQr url={url} /> : null}
+      <QrSheet
+        visible={showQr}
+        title={qrSheetTitle({ kind: 'bill' })}
+        url={url}
+        onClose={() => setShowQr(false)}
+        returnFocusTo={qrTrigger}
+      />
 
       {isHost && !confirming ? (
         <TextLink

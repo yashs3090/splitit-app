@@ -9,12 +9,51 @@
 // Settle early and differences (docs/specs/2026-11-25-settle-early-and-differences.md, Task 3, A1):
 // rules E and Z (`maySettle`, `allZero`, the same rule as SQL's private.settle_state), the 'early'
 // plan behind `settlePlan(..., { allowEarly: true })`, and a `difference` on every marked non-payer.
+//
+// Sent via Venmo (docs/specs/2026-11-26-sent-via-venmo.md D4, D7, §11, Task 3): a mark also says how
+// it was paid and who it was to, and every entry carries the payer's "Not received" flag. Neither
+// changes any amount or count here: a flag is not a mark.
+//
+// Who paid (docs/specs/2026-11-26-who-paid.md, Amendment A1, Task 6): `ledgerSettlePlan` reads the
+// bill's payers, payments ledger and flags (BillData). A single payer whose payments all involve
+// them gets exactly today's settlePlan; several payers, or money that moved between other people,
+// get a 'routes' plan from contract T (lib/transfers.ts). A split whose amounts no longer add up to
+// the total is 'blocked_payers', checked before incomplete and all-$0 (S8). Rule E′: no settling
+// early while the paying is split. `balanceFor` is Home's per-viewer balance in cents (S2).
+import type { Payer, PayersMode } from './payers';
+import { payersState } from './payers';
+import type { PaymentMethod } from './paymentMethods';
 import { computeShares, sharesComplete, type SplitInput, type SplitResult } from './split';
+// transfers.ts imports differenceFor from here; the cycle is safe because neither module uses the
+// other at load time, only inside functions.
+import {
+  currentPlanKey,
+  pairState,
+  settleTransfers,
+  transfersFromReadyPlan,
+  type Outside,
+  type Pair,
+  type Payment,
+  type Provenance,
+} from './transfers';
 
-/** One person's "I paid": the amount the screen showed and when they tapped it. */
-export type SettleMark = { cents: number; at: string };
+/**
+ * One person's "I paid": the amount the screen showed, when they tapped it (as the database sent
+ * it), how they paid, and who it was to (`toUserId`: the bill's payer when fetched; marks store no
+ * payer, §11). Read as one transfer from the entry's person to `toUserId`.
+ */
+export type SettleMark = { cents: number; at: string; method: PaymentMethod; toUserId: string };
 /** userId → mark (missing or null = not marked). */
 export type SettleMarks = Readonly<Record<string, SettleMark | null | undefined>>;
+
+/**
+ * Contract N (D4): the payer said this person's mark never arrived. `cents` and `method` are the
+ * cleared mark's; `toUserId` is who the money was owed to (not_received_by). Kept as fetched: the
+ * views decide whether it still applies (`toUserId === plan.payerId`, and no new mark).
+ */
+export type SettleNotReceived = { cents: number; method: PaymentMethod; toUserId: string };
+/** userId → flag (missing or null = none). */
+export type SettleNotReceivedMap = Readonly<Record<string, SettleNotReceived | null | undefined>>;
 
 export type SettleRole = 'payer' | 'owes' | 'nothing' | 'payer_owes_them';
 
@@ -40,8 +79,10 @@ export type SettleDifference = { kind: 'more' | 'back'; cents: number; fromCents
  */
 export type SettleDifferenceField = { difference?: SettleDifference | null };
 
-type PayerEntry = { userId: string; role: 'payer'; mark: SettleMark | null }; // the payer's share is never collected
-type OwerFields = { userId: string; role: Exclude<SettleRole, 'payer'>; owedCents: number; mark: SettleMark | null };
+/** On every entry, the payer's included (null there in practice: nobody owes the payer to themself). */
+type FlagField = { notReceived: SettleNotReceived | null };
+type PayerEntry = { userId: string; role: 'payer'; mark: SettleMark | null } & FlagField; // the payer's share is never collected
+type OwerFields = { userId: string; role: Exclude<SettleRole, 'payer'>; owedCents: number; mark: SettleMark | null } & FlagField;
 
 export type SettleEntry = PayerEntry | (OwerFields & Partial<SettleMarkDiff> & SettleDifferenceField);
 
@@ -144,15 +185,16 @@ export function allZero(input: SplitInput): boolean {
 }
 
 /**
- * Rule E (spec D2): may `userId` mark paid on this bill? 'all_zero' (rule Z) wins, then 'final'
- * (complete, rule C1), then 'early' (proportional, and the user has a claim on an item row), else
- * 'not_complete'. Being the payer is checked elsewhere (the DB's is_payer, the view's payer card).
+ * Rule E (spec D2) with who-paid's E′: may `userId` mark paid on this bill? 'all_zero' (rule Z) wins,
+ * then 'final' (complete, rule C1), then 'early' (one payer, proportional, and the user has a claim
+ * on an item row), else 'not_complete'. A split payment (`mode` 'split') is never early. Being the
+ * payer is checked elsewhere (the DB's is_payer, the view's payer card).
  */
-export function maySettle(input: SplitInput, userId: string): SettleState {
+export function maySettle(input: SplitInput, userId: string, mode: PayersMode = 'one'): SettleState {
   const shares = computeShares(input);
   if (allZeroFrom(input, shares)) return 'all_zero';
   if (sharesComplete(input).complete) return 'final';
-  if (input.extrasMode === 'proportional' && itemClaimers(input, shares).has(userId)) return 'early';
+  if (mode === 'one' && input.extrasMode === 'proportional' && itemClaimers(input, shares).has(userId)) return 'early';
   return 'not_complete';
 }
 
@@ -185,25 +227,47 @@ export function differenceOf(entry: SettleEntry | SettleEarlyEntry): SettleDiffe
   return entry.difference ?? null;
 }
 
-type SettleOptions = { allowEarly?: boolean };
+type SettleOptions = { allowEarly?: boolean; notReceived?: SettleNotReceivedMap };
+
+/** The two maps settlePlan takes, from fetched participants (BillMember has these fields). */
+export function settleFactsOf(
+  participants: readonly { userId: string; mark: SettleMark | null; notReceived: SettleNotReceived | null }[],
+): { marks: SettleMarks; notReceived: SettleNotReceivedMap } {
+  return {
+    marks: Object.fromEntries(participants.map((p) => [p.userId, p.mark])),
+    notReceived: Object.fromEntries(participants.map((p) => [p.userId, p.notReceived])),
+  };
+}
 
 /**
  * Without options (or `allowEarly: false`) the result is today's SettlePlan: an incomplete bill is
  * 'blocked', even when all-$0. With `{ allowEarly: true }` (D2 table, A1.7): an incomplete all-$0
  * bill is 'blocked_all_zero', an incomplete proportional bill is 'early' (each non-payer carries
  * canSettle), and even mode stays 'blocked'. Complete bills give the same plan either way.
+ * `notReceived` puts each person's flag on their entry (absent = null for everyone).
  */
-export function settlePlan(input: SplitInput, payerId: string, marks: SettleMarks, opts?: { allowEarly?: false }): SettlePlan;
-export function settlePlan(input: SplitInput, payerId: string, marks: SettleMarks, opts: { allowEarly: true }): SettlePlanWithEarly;
+export function settlePlan(
+  input: SplitInput,
+  payerId: string,
+  marks: SettleMarks,
+  opts?: { allowEarly?: false; notReceived?: SettleNotReceivedMap },
+): SettlePlan;
+export function settlePlan(
+  input: SplitInput,
+  payerId: string,
+  marks: SettleMarks,
+  opts: { allowEarly: true; notReceived?: SettleNotReceivedMap },
+): SettlePlanWithEarly;
 export function settlePlan(input: SplitInput, payerId: string, marks: SettleMarks, opts?: SettleOptions): SettlePlanWithEarly;
 export function settlePlan(input: SplitInput, payerId: string, marks: SettleMarks, opts: SettleOptions = {}): SettlePlanWithEarly {
   if (!input.participantIds.includes(payerId)) return { status: 'blocked_bad_payer' };
+  const flags = opts.notReceived ?? {};
 
   // Rule C1: the same rule as private.bill_is_complete (every row has at least one claim).
   const { complete, unclaimedRows, unclaimedDiscountRows } = sharesComplete(input);
   if (!complete) {
     if (opts.allowEarly !== true) return { status: 'blocked', unclaimedRows, unclaimedDiscountRows };
-    return earlyPlan(input, payerId, marks, unclaimedRows, unclaimedDiscountRows);
+    return earlyPlan(input, payerId, marks, flags, unclaimedRows, unclaimedDiscountRows);
   }
 
   const shares = computeShares(input);
@@ -217,20 +281,22 @@ export function settlePlan(input: SplitInput, payerId: string, marks: SettleMark
 
   const people: SettleEntry[] = shares.people.map(({ userId, totalCents }) => {
     const mark = marks[userId] ?? null;
-    if (userId === payerId) return { userId, role: 'payer', mark };
+    const notReceived = flags[userId] ?? null;
+    if (userId === payerId) return { userId, role: 'payer', mark, notReceived };
     const role = roleFor(totalCents);
     if (role === 'owes') {
       collectCents += totalCents;
       owingCount++;
       if (mark) paidCount++;
     }
-    if (!mark) return { userId, role, owedCents: totalCents, mark };
+    if (!mark) return { userId, role, owedCents: totalCents, mark, notReceived };
     const markDiffCents = totalCents - mark.cents;
     return {
       userId,
       role,
       owedCents: totalCents,
       mark,
+      notReceived,
       markDiffCents,
       markDiffers: markDiffCents !== 0,
       difference: differenceFor(totalCents, mark.cents),
@@ -253,6 +319,7 @@ function earlyPlan(
   input: SplitInput,
   payerId: string,
   marks: SettleMarks,
+  flags: SettleNotReceivedMap,
   unclaimedRows: number,
   unclaimedDiscountRows: number,
 ): SettlePlanWithEarly {
@@ -264,9 +331,220 @@ function earlyPlan(
   const claimers = itemClaimers(input, shares);
   const people: SettleEarlyEntry[] = shares.people.map(({ userId, totalCents }) => {
     const mark = marks[userId] ?? null;
-    if (userId === payerId) return { userId, role: 'payer', mark };
-    const entry = { userId, role: roleFor(totalCents), owedCents: totalCents, mark, canSettle: claimers.has(userId) };
+    const notReceived = flags[userId] ?? null;
+    if (userId === payerId) return { userId, role: 'payer', mark, notReceived };
+    const entry = { userId, role: roleFor(totalCents), owedCents: totalCents, mark, notReceived, canSettle: claimers.has(userId) };
     return mark ? { ...entry, difference: differenceFor(totalCents, mark.cents) } : entry;
   });
   return { status: 'early', payerId, unclaimedRows, unclaimedDiscountRows, people };
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Who paid (Task 6): the plan from the payments ledger
+// ---------------------------------------------------------------------------------------------------
+
+/** A ledger entry or flag with a known method (BillPayment / BillPaymentFlag in lib/bills.ts). */
+export type SettleLedgerFlag = { fromId: string; toId: string; cents: number; method: PaymentMethod };
+
+/**
+ * What ledgerSettlePlan reads from BillData: bills.payer_id (the one payer, or the split's lead),
+ * the bill_payers rows (empty = one person), every bill_payments entry and every flag. fetchBill has
+ * already checked that every id is a participant and the rows pass payersState.
+ */
+export type SettleLedger = {
+  payerId: string;
+  payers: readonly Payer[];
+  payments: readonly Payment[];
+  flags: readonly SettleLedgerFlag[];
+};
+
+/** One participant on a 'routes' plan. `canSettle`: rule E/E′ (always true on a complete bill). */
+export type SettleRoutesPerson = { userId: string; paidCents: number; shareCents: number; canSettle: boolean };
+
+/**
+ * Several payers, or a single payer with money that moved between other people (A1.2): contract T's
+ * pairs. `key` is the plan key a payment made from this plan is stamped with (Task 10's mark_paid).
+ * `early` is set on an early single-payer plan (proportional, incomplete; never split, rule E′).
+ * `allPaid`: every pair is paid within tolerance (outside routes never count, as today).
+ */
+export type SettleRoutes = {
+  status: 'routes';
+  key: string;
+  mode: PayersMode;
+  leadId: string;
+  /** Lead first (payersState). One person = [{ leadId, total }]. */
+  payers: Payer[];
+  /** One per participant, by userId. */
+  people: SettleRoutesPerson[];
+  /** Ordered by fromId, then toId. */
+  pairs: Pair[];
+  outside: Outside[];
+  provenance: Provenance;
+  /** Every flag, as fetched (the views decide which still apply). */
+  flags: SettleLedgerFlag[];
+  allPaid: boolean;
+  early: null | { unclaimedRows: number; unclaimedDiscountRows: number };
+};
+
+/**
+ * A split whose amounts don't add up to the current total (contract W `stale`): no amounts until
+ * the payer fixes it. Wins over 'blocked' and 'blocked_all_zero' (S8), as payers_stale does in the DB.
+ * `gapCents` = total − assigned: > 0 left to assign, < 0 more than the total.
+ */
+export type SettleBlockedPayers = {
+  status: 'blocked_payers';
+  leadId: string;
+  payers: Payer[];
+  gapCents: number;
+  assignedCents: number;
+  totalCents: number;
+};
+
+export type BillSettlePlan = SettlePlanWithEarly | SettleRoutes | SettleBlockedPayers;
+
+/**
+ * The bill's settle plan from its ledger, and the current plan key (null when the plan shows no
+ * amounts). First match wins:
+ *   1. a payer (or payer_id) who isn't a participant → 'blocked_bad_payer';
+ *   2. a stale split → 'blocked_payers' (S8: before incomplete and all-$0);
+ *   3. one payer, every payment to or from them, and nobody's net to the payer below 0 → exactly
+ *      today's settlePlan, with contract P's mark per person and each person's flag as notReceived
+ *      (the one to the payer first; A1.7: single-payer bills unchanged);
+ *   4. otherwise 'routes': incomplete → 'blocked' (no allowEarly), 'blocked_all_zero' (rule Z),
+ *      'blocked' (split, rule E′, or even mode), else early routes; complete with cents left over →
+ *      'blocked_all_zero'; else contract T.
+ * Steps 1–2 and the completeness checks run before settleTransfers, so its RangeErrors (W, Σ ≠ 0)
+ * can't be reached from valid BillData (N8).
+ */
+export function ledgerSettlePlan(
+  input: SplitInput,
+  ledger: SettleLedger,
+  opts: { allowEarly?: boolean } = {},
+): { plan: BillSettlePlan; planKey: string | null } {
+  const none = (plan: BillSettlePlan) => ({ plan, planKey: null });
+  const ids = new Set(input.participantIds);
+  if (!ids.has(ledger.payerId) || !ledger.payers.every((p) => ids.has(p.userId))) return none({ status: 'blocked_bad_payer' });
+
+  const w = payersState({ payerId: ledger.payerId, rows: ledger.payers, totalCents: input.totalCents });
+  if (w.stale) {
+    return none({
+      status: 'blocked_payers',
+      leadId: w.leadId,
+      payers: w.payers,
+      gapCents: w.gapCents,
+      assignedCents: w.assignedCents,
+      totalCents: input.totalCents,
+    });
+  }
+
+  const payerId = w.leadId;
+  const payments = ledger.payments;
+  if (w.mode === 'one' && isLegacyLedger(input.participantIds, payerId, payments)) {
+    const marks: Record<string, SettleMark | null> = {};
+    const notReceived: Record<string, SettleNotReceived | null> = {};
+    for (const userId of input.participantIds) {
+      if (userId === payerId) continue;
+      const mark = pairState(payments, userId, payerId).mark;
+      marks[userId] = mark ? { cents: mark.cents, at: mark.at, method: mark.method, toUserId: payerId } : null;
+    }
+    // One flag per person, as today's entries carry: the one to the payer, else (a flag to an earlier
+    // payer, which the views already ignore) the one to the lowest id, so the plan is deterministic.
+    const flags = [...ledger.flags].sort((x, y) => Number(y.toId === payerId) - Number(x.toId === payerId) || (x.toId < y.toId ? -1 : x.toId > y.toId ? 1 : 0));
+    for (const f of flags) {
+      if (notReceived[f.fromId] === undefined) notReceived[f.fromId] = { cents: f.cents, method: f.method, toUserId: f.toId };
+    }
+    const plan = settlePlan(input, payerId, marks, { allowEarly: opts.allowEarly === true, notReceived });
+    if (plan.status !== 'ready' && plan.status !== 'early') return none(plan);
+    const shares = computeShares(input).people.map((p) => ({ userId: p.userId, shareCents: p.totalCents }));
+    return { plan, planKey: currentPlanKey({ mode: 'one', leadId: payerId, payers: w.payers, shares, entries: payments }) };
+  }
+
+  const { complete, unclaimedRows, unclaimedDiscountRows } = sharesComplete(input);
+  const shares = computeShares(input);
+  let early: SettleRoutes['early'] = null;
+  if (!complete) {
+    if (opts.allowEarly !== true) return none({ status: 'blocked', unclaimedRows, unclaimedDiscountRows });
+    if (allZeroFrom(input, shares)) return none({ status: 'blocked_all_zero' });
+    if (w.mode === 'split' || input.extrasMode !== 'proportional') return none({ status: 'blocked', unclaimedRows, unclaimedDiscountRows });
+    early = { unclaimedRows, unclaimedDiscountRows };
+  } else if (shares.unclaimedCents !== 0) {
+    return none({ status: 'blocked_all_zero' });
+  }
+
+  const t = settleTransfers({
+    mode: w.mode,
+    leadId: payerId,
+    payers: w.payers,
+    shares: shares.people.map((p) => ({ userId: p.userId, shareCents: p.totalCents })),
+    entries: payments,
+    early: early !== null,
+  });
+  const claimers = early === null ? null : itemClaimers(input, shares);
+  const paidOf = new Map(w.payers.map((p) => [p.userId, p.paidCents]));
+  const plan: SettleRoutes = {
+    status: 'routes',
+    key: t.key,
+    mode: w.mode,
+    leadId: payerId,
+    payers: w.payers,
+    people: shares.people.map((p) => ({
+      userId: p.userId,
+      paidCents: paidOf.get(p.userId) ?? 0,
+      shareCents: p.totalCents,
+      canSettle: claimers === null || claimers.has(p.userId),
+    })),
+    pairs: t.pairs,
+    outside: t.outside,
+    provenance: t.provenance,
+    flags: ledger.flags.map((f) => ({ ...f })),
+    allPaid: t.pairs.every((q) => (q.paidCents > 0 ? q.difference === null : q.remainingCents <= 0)),
+    early,
+  };
+  return { plan, planKey: t.key };
+}
+
+/**
+ * Today's single-payer shape: every entry is to or from the payer, and nobody has been paid back
+ * more than they sent (a net < 0 to the payer has no mark, so today's plan couldn't show it).
+ */
+function isLegacyLedger(participantIds: readonly string[], payerId: string, payments: readonly Payment[]): boolean {
+  if (!payments.every((e) => e.fromId === payerId || e.toId === payerId)) return false;
+  return participantIds.every((u) => u === payerId || pairState(payments, u, payerId).net >= 0);
+}
+
+/**
+ * S2: the viewer's balance on a plan, in cents (contract O). Per pair the viewer is on:
+ * paid > 0 → the difference ('more' +cents, 'back' −cents, none 0), else the remaining. As `from`, a
+ * positive amount is owed by the viewer and a negative one owed to them; as `to`, the mirror.
+ * Outside routes never count. `final` = the plan is complete (not early). Unknown on a plan with no
+ * amounts, or for someone not in it. On a single-payer plan, the payer's owedCents is Home's
+ * stillToCollectCents and owes/owed > 0 are viewerBalance's booleans.
+ */
+export type SettleBalance = { known: false } | { known: true; final: boolean; owesCents: number; owedCents: number };
+
+export function balanceFor(plan: BillSettlePlan, userId: string): SettleBalance {
+  let pairs: readonly Pair[];
+  let final: boolean;
+  if (plan.status === 'ready' || plan.status === 'early') {
+    if (!(plan.people as readonly { userId: string }[]).some((p) => p.userId === userId)) return { known: false };
+    pairs = transfersFromReadyPlan(plan).pairs;
+    final = plan.status === 'ready';
+  } else if (plan.status === 'routes') {
+    if (!plan.people.some((p) => p.userId === userId)) return { known: false };
+    pairs = plan.pairs;
+    final = plan.early === null;
+  } else {
+    return { known: false };
+  }
+  let owesCents = 0;
+  let owedCents = 0;
+  for (const q of pairs) {
+    if (q.fromId !== userId && q.toId !== userId) continue;
+    const d = q.difference;
+    const amt = q.paidCents > 0 ? (d === null ? 0 : d.kind === 'more' ? d.cents : -d.cents) : q.remainingCents;
+    const forViewer = q.fromId === userId ? amt : -amt;
+    if (forViewer > 0) owesCents += forViewer;
+    else if (forViewer < 0) owedCents -= forViewer;
+  }
+  return { known: true, final, owesCents, owedCents };
 }

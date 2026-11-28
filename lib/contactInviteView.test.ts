@@ -1,5 +1,5 @@
 // Copy for "From contacts" (spec docs/specs/2026-11-24-people-and-invites.md, D6 contacts flow, Task 10).
-import { CONTACT_COPY, phoneChoiceA11yLabel, phoneLabelText } from './contactInviteView';
+import { CONTACT_COPY, contactSendHints, phoneChoiceA11yLabel, phoneLabelText } from './contactInviteView';
 
 describe('phoneLabelText (PI-C-1)', () => {
   it.each([
@@ -49,5 +49,22 @@ describe('CONTACT_COPY (spec D6)', () => {
     expect(CONTACT_COPY.sendWith).toBe('Send with:');
     expect(CONTACT_COPY.error).toBe("Couldn't open your contacts. Use Share… instead.");
     expect(CONTACT_COPY.denied).toBe("SplitIt can't open your contacts. You can allow it in Settings.");
+  });
+});
+
+describe('contactSendHints (review R5): the hint follows the invite kind', () => {
+  it('a bill invite keeps the bill wording (CONTACT_COPY, unchanged for bill callers)', () => {
+    expect(contactSendHints('bill')).toEqual({
+      messages: 'Opens a text with the bill link filled in',
+      whatsApp: 'Opens WhatsApp with the bill link filled in',
+    });
+    expect(contactSendHints('bill').messages).toBe(CONTACT_COPY.messagesHint);
+    expect(contactSendHints('bill').whatsApp).toBe(CONTACT_COPY.whatsAppHint);
+  });
+  it('a group invite says group link', () => {
+    expect(contactSendHints('group')).toEqual({
+      messages: 'Opens a text with the group link filled in',
+      whatsApp: 'Opens WhatsApp with the group link filled in',
+    });
   });
 });
